@@ -9,7 +9,7 @@ Built by **Danyal Tareen** · free to use for personal & commercial work ·
 [License](LICENSE.txt) (please don't resell or redistribute modified copies
 share the official link instead).
 
-![Downloads](https://img.shields.io/github/downloads/coco8897/danyals-rig-builder/total)
+![Downloads](https://img.shields.io/github/downloads/coco8897/danyals-rig-builder/total?color=brightgreen)
 
 ---
 

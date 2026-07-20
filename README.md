@@ -61,7 +61,7 @@ The included **QUICKSTART.md** walks the full workflow.
 ## Feedback please!
 
 This is a **free public test release**. If something breaks or you wish it worked
-differently, **open a GitHub Issue** (screenshots + Maya version help a lot) —
+differently, **open a GitHub Issue** (screenshots + Maya version help a lot)
 that's the whole point of releasing it. 🙏
 
 ## Privacy note (telemetry)

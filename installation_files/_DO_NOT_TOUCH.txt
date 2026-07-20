@@ -1,0 +1,4 @@
+These are the tool's internal files.
+DO NOT move, rename, or edit anything in here.
+
+To install: go UP one folder and drag install.py into your Maya viewport.

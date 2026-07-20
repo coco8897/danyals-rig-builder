@@ -1,6 +1,6 @@
 # Danyal's Rig Builder
 
-**A free, modular auto-rigging toolset for Autodesk Maya** — build a fully-controlled,
+**A free, modular auto-rigging toolset for Autodesk Maya** build a fully-controlled,
 production-style rig from guides in minutes: biped, quadruped, bird, or vehicle,
 with an Advanced-Skeleton-inspired facial system, skinning tools, pose library,
 expression presets, and game-engine export.

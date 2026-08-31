@@ -25,7 +25,10 @@
 
 import os
 import maya.cmds as cmds
-from PySide2 import QtCore, QtWidgets, QtGui
+try:
+    from PySide2 import QtCore, QtWidgets, QtGui
+except ImportError:                                  # Maya 2025+ (Qt6)
+    from PySide6 import QtCore, QtWidgets, QtGui
 
 
 # -----------------------------------------------------------------------------
@@ -330,7 +333,11 @@ class InfoButton(QtWidgets.QToolButton):
 
     def _open_popup(self):
         dlg = InfoDialog(self.button_id, parent=self.window())
-        dlg.exec_()
+        # PySide2 has exec_() only; PySide6 uses exec().
+        if hasattr(dlg, "exec"):
+            dlg.exec()
+        else:
+            dlg.exec_()
 
 
 # -----------------------------------------------------------------------------

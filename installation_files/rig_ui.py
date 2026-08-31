@@ -1,6 +1,6 @@
 """
 ===============================================================================
- RIG UI - PySide2 panel for the modular character rig builder
+ RIG UI - PySide2/6 panel for the modular character rig builder
 ===============================================================================
 
  Launch from Maya Script Editor (Python tab):
@@ -23,8 +23,12 @@ from importlib import reload
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 
-from PySide2 import QtCore, QtWidgets
-from shiboken2 import wrapInstance
+try:
+    from PySide2 import QtCore, QtWidgets
+    from shiboken2 import wrapInstance
+except ImportError:                                  # Maya 2025+ (Qt6)
+    from PySide6 import QtCore, QtWidgets
+    from shiboken6 import wrapInstance
 
 import rig_guides
 import character_rig_builder

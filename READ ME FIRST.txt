@@ -1,0 +1,75 @@
+===============================================================
+ DANYAL'S RIG BUILDER  v1.0.1
+ Free auto-rigging toolset for Autodesk Maya (2022-2026)
+===============================================================
+
+ INSTALL  (30 seconds)
+ ---------------------
+ 1. You have already extracted this folder. Good - Maya cannot
+    run the tool from inside the .zip.
+
+ 2. Open Maya.
+
+ 3. Drag the file  install.py  from THIS folder onto an open
+    Maya viewport (the 3D area), and let go.
+
+ 4. A button labelled "DR" / "Danyal's Rig" appears on your
+    current shelf. Click it. The Rig Builder opens.
+
+ That's it. The button stays there next time you open Maya.
+
+ Do NOT move, rename or delete the "installation_files" folder
+ before you install - the installer copies the tool from it.
+
+
+ WHERE TO GO NEXT
+ ----------------
+ QUICKSTART.md  - zero to a finished, export-ready rig.
+                  Start here.
+ PIPELINE.md    - for animators / tech animators / teams:
+                  naming, hierarchy, handoff, referencing,
+                  and the do's and don'ts.
+ README.md      - feature overview and project info.
+ LICENSE.txt    - terms (free for personal AND commercial use).
+
+ The .md files are plain text - if double-clicking asks which
+ program to use, choose Notepad, or read them online at the
+ project page below (they are nicely formatted there).
+
+
+ FIRST RIG IN 60 SECONDS
+ -----------------------
+ 1. Click the DR shelf button.
+ 2. Create Guides.
+ 3. Drag the guide locators onto your model (left side only),
+    then Mirror L to R.
+ 4. Build Rig.
+ 5. Select your mesh, then Auto-Skin Everything.
+ You now have a posable, skinned rig.
+
+
+ IF SOMETHING BREAKS
+ -------------------
+ Please tell me - that is the whole point of this release.
+ Open an issue here:
+ https://github.com/coco8897/danyals-rig-builder/issues
+ Include your Maya version and a screenshot if you can.
+
+
+ UNINSTALL
+ ---------
+ In Maya's Script Editor (Python tab), run:
+     import install; install.uninstall()
+
+
+ PROJECT PAGE
+ ------------
+ https://github.com/coco8897/danyals-rig-builder
+
+ Requires Maya 2022 or newer - including Maya 2025 and 2026
+ (Qt6). Tested on Maya 2023.
+ Anonymous install counter included - see README.md for what
+ it sends and how to switch it off.
+
+ Built by Danyal Tareen.
+===============================================================

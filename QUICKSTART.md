@@ -28,6 +28,13 @@ Pick your character type from the **mode** dropdown at the top:
 3. **Mirror L → R** to copy the left onto the right.
 4. **Save Guides…** to keep the layout as JSON (survives a rebuild).
 
+> **A-pose, T-pose, or anything else?** All fine — just drag the guides onto
+> the pose your model is actually in. Only the guide **positions** are read
+> (never their rotation), and each joint is oriented by aiming it down the
+> chain — so an A-pose arm gets correctly-oriented joints automatically.
+> Tip: to move a whole limb at once, select several guides together, or move
+> the `RIG_GUIDES_GRP` group.
+
 > Have a mesh already? Import it first into a group named `geo` / `Geo` / `GEO`
 > so visibility wiring hooks up automatically at build time.
 

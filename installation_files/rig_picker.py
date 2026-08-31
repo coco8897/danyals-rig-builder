@@ -24,8 +24,12 @@
 import contextlib
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
-from PySide2 import QtCore, QtWidgets, QtGui
-from shiboken2 import wrapInstance
+try:
+    from PySide2 import QtCore, QtWidgets, QtGui
+    from shiboken2 import wrapInstance
+except ImportError:                                  # Maya 2025+ (Qt6)
+    from PySide6 import QtCore, QtWidgets, QtGui
+    from shiboken6 import wrapInstance
 
 import rig_pose_tools
 from importlib import reload as _reload

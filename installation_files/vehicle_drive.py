@@ -34,8 +34,12 @@ import contextlib
 import math
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
-from PySide2 import QtCore, QtWidgets
-from shiboken2 import wrapInstance
+try:
+    from PySide2 import QtCore, QtWidgets
+    from shiboken2 import wrapInstance
+except ImportError:                                  # Maya 2025+ (Qt6)
+    from PySide6 import QtCore, QtWidgets
+    from shiboken6 import wrapInstance
 
 import vehicle_rig_builder
 import raycast_ground

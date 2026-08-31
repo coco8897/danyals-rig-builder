@@ -33,7 +33,8 @@
 
  REQUIREMENTS
  ------------
-   * Maya 2022 or newer (Python 3)
+   * Maya 2022 or newer (Python 3). Maya 2025/2026 (PySide6/Qt6)
+     is supported — the UI imports PySide2 or PySide6 as available.
    * Optional: NG Skin Tools 2 for the auto-skin + paint workflow.
      The UI degrades gracefully if NG isn't installed.
 

@@ -309,6 +309,59 @@ GUIDE_GROUP_OF = {g: grp
 
 
 # =============================================================================
+# EZ GUIDE MODE: child guide -> parent guide
+#
+# Free mode (default) = every guide moves on its own (fingers still ride on
+# their wrist). EZ mode links the whole body like a skeleton: move the root
+# and everything follows, move a shoulder and the elbow + wrist + fingers
+# come along. Switching modes only reparents; no guide moves in world space.
+# Finger chains keep their DEFAULT_GUIDES "parent" links in both modes.
+# =============================================================================
+
+def _ez_parents():
+    ez = {
+        "C_pelvis": "C_root",
+        "C_spine_01": "C_pelvis", "C_spine_02": "C_spine_01",
+        "C_spine_03": "C_spine_02", "C_chest": "C_spine_03",
+        "C_neck": "C_chest", "C_head": "C_neck",
+        "C_headTip": "C_head", "C_face": "C_head",
+        "C_jaw": "C_head", "C_jawTip": "C_jaw", "C_eyesLookAt": "C_head",
+        "C_upperLip": "C_head", "C_lowerLip": "C_jaw",
+        "C_noseTip": "C_head", "C_upperTeeth": "C_head",
+        "C_lowerTeeth": "C_jaw", "C_tongue01": "C_jaw",
+        "C_tongue02": "C_tongue01", "C_tongue03": "C_tongue02",
+        "C_tail_01": "C_pelvis", "C_tailTip": "C_tail_07",
+    }
+    for i in range(2, 8):
+        ez["C_tail_%02d" % i] = "C_tail_%02d" % (i - 1)
+    for s in ("L", "R"):
+        ez.update({
+            s + "_clavicle": "C_chest", s + "_shoulder": s + "_clavicle",
+            s + "_elbow": s + "_shoulder", s + "_wrist": s + "_elbow",
+            s + "_hip": "C_pelvis", s + "_knee": s + "_hip",
+            s + "_ankle": s + "_knee", s + "_ball": s + "_ankle",
+            s + "_toe": s + "_ball", s + "_toeTip": s + "_toe",
+            s + "_eye": "C_head", s + "_ear": "C_head",
+            s + "_cheek": "C_head", s + "_nostril": "C_noseTip",
+            s + "_mouthCorner": "C_head", s + "_upperLipMid": "C_head",
+            s + "_lowerLipMid": "C_jaw",
+        })
+        for part in ("browInner", "browMid", "browOuter"):
+            ez["%s_%s" % (s, part)] = "C_head"
+        for lid in ("UpperInner", "UpperMid", "UpperOuter",
+                    "LowerInner", "LowerMid", "LowerOuter"):
+            ez["%s_eyelid%s" % (s, lid)] = s + "_eye"
+    return ez
+
+
+EZ_PARENTS = _ez_parents()
+
+# Creature-limb locators (rig_creature) carry this string attr = their limb
+# label, so the guide system never mistakes them for stale guides.
+CREATURE_TAG = "creatureLimb"
+
+
+# =============================================================================
 # Plain-English notes — shown in the Attribute Editor when a rigger
 # selects a locator. The point is to make the rig self-documenting so a
 # newcomer doesn't need to memorise terms like "metacarpal" or "ball" to
@@ -503,6 +556,8 @@ class GuideSystem(object):
             reparented = self._apply_parenting()
             noted      = self._apply_notes()
             labelled   = self._apply_labels()
+            if self.is_ez_mode():
+                reparented += self._apply_ez_parenting()
             # Re-assert the symmetricMode visibility — the user may have
             # toggled some R locators on or off manually between sessions.
             self._ensure_symmetric_attr()
@@ -757,6 +812,57 @@ class GuideSystem(object):
         return n
 
     # -----------------------------------------------------------------------
+    # EZ mode: guides linked in a hierarchy (see EZ_PARENTS)
+    # -----------------------------------------------------------------------
+
+    EZ_ATTR = "ezMode"
+
+    def is_ez_mode(self):
+        if not (cmds.objExists(GUIDES_GRP_NAME) and cmds.attributeQuery(
+                self.EZ_ATTR, node=GUIDES_GRP_NAME, exists=True)):
+            return False   # default: Free
+        return bool(cmds.getAttr(f"{GUIDES_GRP_NAME}.{self.EZ_ATTR}"))
+
+    def set_ez_mode(self, on):
+        """EZ (True): link the guides like a skeleton. Free (False): every
+        guide back in its anatomical group. World positions never change.
+        Returns the number of guides reparented."""
+        if not cmds.objExists(GUIDES_GRP_NAME):
+            cmds.warning("No guides in scene.")
+            return 0
+        self._refresh_handles()
+        if not cmds.attributeQuery(self.EZ_ATTR, node=GUIDES_GRP_NAME,
+                                   exists=True):
+            cmds.addAttr(GUIDES_GRP_NAME, ln=self.EZ_ATTR, at="bool", dv=False)
+        cmds.setAttr(f"{GUIDES_GRP_NAME}.{self.EZ_ATTR}", bool(on))
+        if on:
+            return self._apply_ez_parenting()
+        return self._apply_grouping() + self._apply_parenting()
+
+    def _apply_ez_parenting(self):
+        moved = 0
+        for child, parent in EZ_PARENTS.items():
+            c, p = self.guides.get(child), self.guides.get(parent)
+            if not (c and p and cmds.objExists(c) and cmds.objExists(p)):
+                continue
+            if (cmds.listRelatives(c, p=True) or [None])[0] == p:
+                continue
+            cmds.parent(c, p)
+            moved += 1
+        if moved:
+            print(f"[GuideSystem] EZ mode: linked {moved} guide(s).")
+        return moved
+
+    def _set_world_positions(self, targets):
+        """Set {locator: (x, y, z)} parents-first, so moving a parent never
+        drags an already-placed child off its target (matters in EZ mode,
+        and for fingers under the wrist in either mode)."""
+        def depth(loc):
+            return len((cmds.ls(loc, long=True) or [loc])[0].split("|"))
+        for loc in sorted(targets, key=depth):
+            cmds.xform(loc, ws=True, t=targets[loc])
+
+    # -----------------------------------------------------------------------
 
     def _apply_grouping(self):
         """Create anatomical group containers (SPINE_GUIDES, L_ARM_GUIDES,
@@ -766,10 +872,13 @@ class GuideSystem(object):
         Returns the number of locators that were reparented this call.
         """
         moved = 0
+        ez = self.is_ez_mode()
         for guide_name, group_name in GUIDE_GROUP_OF.items():
             loc = self.guides.get(guide_name)
             if not loc or not cmds.objExists(loc):
                 continue
+            if ez and guide_name in EZ_PARENTS:
+                continue          # EZ mode keeps it under its parent guide
             # Make sure the group container exists.
             if not cmds.objExists(group_name):
                 cmds.group(em=True, n=group_name, p=self.guides_grp)
@@ -843,6 +952,30 @@ class GuideSystem(object):
 
     def delete(self):
         if self.exists():
+            # Creature guides linked under body guides (EZ mode) go back to
+            # their own limb group first, so deleting the body guides
+            # doesn't take them along.
+            # Only the top-most creature guide of each linked run moves (by
+            # UUID, since long paths change as we go); its own creature
+            # children ride along with it.
+            tops = []
+            for node in cmds.ls("*." + CREATURE_TAG, o=True, long=True) or []:
+                if not node.startswith("|" + GUIDES_GRP_NAME + "|"):
+                    continue
+                par = (cmds.listRelatives(node, p=True, fullPath=True)
+                       or [None])[0]
+                if par and cmds.attributeQuery(CREATURE_TAG, node=par,
+                                               exists=True):
+                    continue
+                tops.append(cmds.ls(node, uuid=True)[0])
+            for uid in tops:
+                node = cmds.ls(uid, long=True)[0]
+                label = cmds.getAttr(node + "." + CREATURE_TAG)
+                home = f"{label}_LIMB_GUIDES"
+                if cmds.objExists(home):
+                    cmds.parent(node, home)
+                else:
+                    cmds.parent(node, world=True)
             cmds.delete(GUIDES_GRP_NAME)
             self.guides = {}
             print(f"[GuideSystem] Deleted {GUIDES_GRP_NAME}.")
@@ -853,10 +986,10 @@ class GuideSystem(object):
             cmds.warning("No guides to reset.")
             return
         self._refresh_handles()
-        for name, info in DEFAULT_GUIDES.items():
-            loc = self.guides.get(name)
-            if loc and cmds.objExists(loc):
-                cmds.xform(loc, ws=True, t=info["pos"])
+        self._set_world_positions({
+            self.guides[name]: info["pos"]
+            for name, info in DEFAULT_GUIDES.items()
+            if self.guides.get(name) and cmds.objExists(self.guides[name])})
         print("[GuideSystem] Reset all guides to defaults.")
 
     # -----------------------------------------------------------------------
@@ -869,7 +1002,7 @@ class GuideSystem(object):
             cmds.warning("No guides to mirror.")
             return
         self._refresh_handles()
-        mirrored = 0
+        targets = {}
         for name, loc in self.guides.items():
             if not name.startswith("L_"):
                 continue
@@ -878,8 +1011,9 @@ class GuideSystem(object):
             if not r_loc or not cmds.objExists(r_loc):
                 continue
             x, y, z = cmds.xform(loc, q=True, ws=True, t=True)
-            cmds.xform(r_loc, ws=True, t=(-x, y, z))
-            mirrored += 1
+            targets[r_loc] = (-x, y, z)
+        self._set_world_positions(targets)
+        mirrored = len(targets)
         print(f"[GuideSystem] Mirrored {mirrored} L -> R guides.")
 
     # -----------------------------------------------------------------------
@@ -1212,10 +1346,9 @@ class GuideSystem(object):
             self.build()
         else:
             self._refresh_handles()
-        for name, pos in data.items():
-            loc = self.guides.get(name)
-            if loc and cmds.objExists(loc):
-                cmds.xform(loc, ws=True, t=tuple(pos))
+        self._set_world_positions({
+            self.guides[name]: tuple(pos) for name, pos in data.items()
+            if self.guides.get(name) and cmds.objExists(self.guides[name])})
         print(f"[GuideSystem] Loaded {len(data)} guide positions from "
               f"{filepath}")
 
@@ -1254,6 +1387,10 @@ class GuideSystem(object):
             if short.endswith(GUIDE_SUFFIX) and short not in valid:
                 # Skip non-locator label children: *_GUIDE_label.
                 if short.endswith(self.LABEL_SUFFIX):
+                    continue
+                # Creature-limb guides linked under a body guide (EZ mode)
+                # belong to rig_creature, not to us.
+                if cmds.attributeQuery(CREATURE_TAG, node=node, exists=True):
                     continue
                 # Confirm it's actually a locator (has a locator shape).
                 shapes = cmds.listRelatives(node, s=True,

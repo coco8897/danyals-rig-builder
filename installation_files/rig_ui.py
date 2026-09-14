@@ -43,10 +43,16 @@ import vehicle_bind
 import raycast_ground
 import rig_space_switch
 import rig_pose_lib
+import forge_theme as ft
 import rig_skin
 import advanced_face
 import advanced_face_ui
 import rig_export
+import rig_creature
+
+# Forge-suite accent for this tool (amber). The rest of the palette
+# lives in forge_theme so every Forge tool stays visually in sync.
+ACCENT = ft.ACCENT_RIG
 import rig_picker
 import rig_info
 import rig_correctives
@@ -71,6 +77,7 @@ reload(rig_skin)
 reload(advanced_face)
 reload(advanced_face_ui)
 reload(rig_export)
+reload(rig_creature)
 reload(rig_picker)
 reload(rig_info)
 reload(rig_correctives)
@@ -122,18 +129,20 @@ class CollapsibleBox(QtWidgets.QWidget):
         self.toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(QtCore.Qt.DownArrow if expanded
                                  else QtCore.Qt.RightArrow)
-        self.toggle.setStyleSheet(
-            "QToolButton { border: none; font-weight: bold; padding: 5px 2px; "
-            "color: #cfd3d8; text-align: left; }"
-            "QToolButton:hover { color: #ffffff; }")
+        self.toggle.setStyleSheet(ft.section_header_css(ACCENT))
         self.toggle.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
                                   QtWidgets.QSizePolicy.Fixed)
         self.toggle.toggled.connect(self._on_toggled)
 
         self.content = QtWidgets.QWidget()
         self.content.setVisible(expanded)
+        # Scope the rail to THIS widget by object name. A bare "QWidget {}"
+        # rule cascades to every label/combo inside and draws a bar on each.
+        self.content.setObjectName("collapsibleContent")
+        self.content.setAttribute(QtCore.Qt.WA_StyledBackground, True)
         self.content.setStyleSheet(
-            "QWidget { border-left: 2px solid #3a3f44; }")
+            "QWidget#collapsibleContent { border-left: 2px solid %s; }"
+            % ft.BORDER)
 
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -178,8 +187,9 @@ class RigBuilderUI(QtWidgets.QDialog):
         super(RigBuilderUI, self).__init__(parent or _maya_main_window())
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle("Danyal's Rig Builder")
-        self.setMinimumWidth(340)
+        self.setMinimumWidth(360)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.Window)
+        self.setStyleSheet(ft.style(ACCENT))
 
         self.guide_system = rig_guides.GuideSystem()
         self.rig = None
@@ -220,13 +230,31 @@ class RigBuilderUI(QtWidgets.QDialog):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
+        # ---------- BRANDED HEADER (matches the Forge tool suite) ----------
+        hdr = QtWidgets.QVBoxLayout()
+        hdr.setSpacing(1)
+        _title = QtWidgets.QLabel("RIG BUILDER")
+        _title.setObjectName("title")
+        hdr.addWidget(_title)
+        _sub = QtWidgets.QLabel(
+            "Biped / Quadruped / Bird / Vehicle  ·  guides to game-ready")
+        _sub.setObjectName("subtitle")
+        hdr.addWidget(_sub)
+        root.addLayout(hdr)
+
+        _rule = QtWidgets.QFrame()
+        _rule.setFrameShape(QtWidgets.QFrame.HLine)
+        _rule.setStyleSheet("color: %s;" % ft.BORDER)
+        root.addWidget(_rule)
+
         # ---------- RIG TYPE MODE SELECTOR ----------
         # Switching the mode shows that template's sections and hides the
         # other's, so the panel stays compact instead of stacking every
         # biped + quadruped option at once.
         mode_row = QtWidgets.QHBoxLayout()
         mode_lbl = QtWidgets.QLabel("Rig Type:")
-        mode_lbl.setStyleSheet("QLabel { font-weight: bold; }")
+        mode_lbl.setStyleSheet("QLabel { color: %s; font-weight: 600; }"
+                               % ft.MUTED)
         mode_row.addWidget(mode_lbl)
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Biped", "Quadruped", "Bird", "Vehicle"])
@@ -234,12 +262,9 @@ class RigBuilderUI(QtWidgets.QDialog):
 
         # Quick-launch the picker — always visible (independent of rig type).
         self.btn_open_picker = QtWidgets.QPushButton("Open Picker")
+        self.btn_open_picker.setObjectName("primary")
         self.btn_open_picker.setStyleSheet(
-            "QPushButton { background: #3a4f6a; color: #cfe0ff; "
-            "padding: 4px 10px; font-weight: bold; "
-            "border-radius: 3px; }"
-            "QPushButton:hover { background: #5c80b0; color: white; }"
-        )
+            "QPushButton { padding: 4px 10px; }")
         self.btn_open_picker.setToolTip(
             "Open the anatomical ctrl picker window.")
         mode_row.addWidget(self.btn_open_picker)
@@ -294,6 +319,24 @@ class RigBuilderUI(QtWidgets.QDialog):
             "Build Rig stops auto-mirroring.")
         gl.addWidget(self.cb_symmetric, 5, 0, 1, 2)
 
+        # Guide mode: Free (every guide on its own) or EZ (linked like a
+        # skeleton, so moving a parent guide carries its children).
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.addWidget(QtWidgets.QLabel("Guide mode:"))
+        self.guide_mode_combo = QtWidgets.QComboBox()
+        self.guide_mode_combo.addItems(
+            ["Free  (move each guide on its own)",
+             "EZ  (linked: move a parent, children follow)"])
+        self.guide_mode_combo.setToolTip(
+            "Free: every guide moves on its own. Full control, like before.\n"
+            "EZ: guides are linked in a hierarchy like the skeleton. Move the\n"
+            "root and the whole body follows, move a shoulder and the elbow,\n"
+            "wrist and fingers come along. Creature limbs link to what they\n"
+            "attach to.\n"
+            "Switch any time: nothing moves, only the linking changes.")
+        mode_row.addWidget(self.guide_mode_combo, 1)
+        gl.addLayout(mode_row, 6, 0, 1, 2)
+
         root.addWidget(self.guides_box)
 
         # ---------- BUILD SECTION (biped) ----------
@@ -341,7 +384,8 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_advanced_face = QtWidgets.QPushButton(
             "Advanced Face (mesh-conforming)…")
         self.btn_advanced_face.setStyleSheet(
-            "QPushButton { color: #80c0ff; font-weight: bold; padding: 5px; }")
+            "QPushButton { color: %s; font-weight: 600; padding: 5px; }"
+            % ACCENT)
         self.btn_advanced_face.setToolTip(
             "Open the Advanced Face window — fit eyelid + lip joints to your\n"
             "actual mesh edge loops (AdvancedSkeleton-style), with as many\n"
@@ -438,6 +482,155 @@ class RigBuilderUI(QtWidgets.QDialog):
         bendy_row.addStretch(1)
         bl.addLayout(bendy_row)
 
+        # ---- Creature limbs + custom chains (collapsed) ----
+        self.creature_box = CollapsibleBox(
+            "Creature Limbs + Custom Chains")
+        cr = QtWidgets.QVBoxLayout()
+        cr.setSpacing(5)
+
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.addWidget(QtWidgets.QLabel("Preset:"))
+        self.creature_preset_combo = QtWidgets.QComboBox()
+        for name, preset in rig_creature.PRESETS.items():
+            self.creature_preset_combo.addItem(name)
+            self.creature_preset_combo.setItemData(
+                self.creature_preset_combo.count() - 1, preset["about"],
+                QtCore.Qt.ToolTipRole)
+        preset_row.addWidget(self.creature_preset_combo, 1)
+        self.btn_creature_preset = QtWidgets.QPushButton("Add Preset")
+        self.btn_creature_preset.setToolTip(
+            "Drop guides for every limb in the preset. Move them to fit your\n"
+            "model, then Build Rig.")
+        preset_row.addWidget(self.btn_creature_preset)
+        preset_row.addWidget(rig_info.make_info_button("creature_limbs"))
+        cr.addLayout(preset_row)
+
+        limb_grid = QtWidgets.QGridLayout()
+        limb_grid.setSpacing(4)
+        self.creature_type_combo = QtWidgets.QComboBox()
+        self.creature_type_combo.addItems(
+            ["Arm", "Leg", "Tail", "Chain (custom controls)"])
+        self.creature_type_combo.setToolTip(
+            "Arm / Leg / Tail: a full copy of the biped's rig for that limb.\n"
+            "Chain: your own joint chain (cape, antenna, tentacle, horn,\n"
+            "extra spine...) with FK, IK or switchable FK + IK controls.")
+        self.creature_label_edit = QtWidgets.QLineEdit()
+        self.creature_label_edit.setPlaceholderText("name, e.g. lowerArm")
+        self.creature_label_edit.setToolTip(
+            "Becomes part of every node name: L_lowerArm_IK_CTRL ...\n"
+            "Letters and digits, starting with a letter. Names the biped or\n"
+            "face already use (arm, neck, jaw ...) are not allowed.")
+        self.creature_parent_combo = QtWidgets.QComboBox()
+        self.creature_parent_combo.addItems(
+            ["Default", "Chest", "Pelvis", "COG", "Head", "Custom (pick)"])
+        self.creature_parent_combo.setToolTip(
+            "What the limb hangs off. Default: chest for arms and chains,\n"
+            "pelvis for legs and tails.\n"
+            "Custom: select ANY guide or joint (spine 2, tail 3, another\n"
+            "limb's knee...) and click Pick Selected.")
+        self.creature_side_combo = QtWidgets.QComboBox()
+        self.cb_creature_clavicle = QtWidgets.QCheckBox("Clavicle")
+        self.cb_creature_clavicle.setChecked(True)
+        self.cb_creature_fingers = QtWidgets.QCheckBox("Fingers")
+        limb_grid.addWidget(QtWidgets.QLabel("Type:"), 0, 0)
+        limb_grid.addWidget(self.creature_type_combo, 0, 1)
+        limb_grid.addWidget(QtWidgets.QLabel("Name:"), 0, 2)
+        limb_grid.addWidget(self.creature_label_edit, 0, 3)
+        limb_grid.addWidget(QtWidgets.QLabel("Attach:"), 1, 0)
+        limb_grid.addWidget(self.creature_parent_combo, 1, 1)
+        limb_grid.addWidget(QtWidgets.QLabel("Side:"), 1, 2)
+        limb_grid.addWidget(self.creature_side_combo, 1, 3)
+        cr.addLayout(limb_grid)
+
+        # Custom attach: pick the selected guide / joint.
+        self.creature_attach_row = QtWidgets.QWidget()
+        ar = QtWidgets.QHBoxLayout(self.creature_attach_row)
+        ar.setContentsMargins(0, 0, 0, 0)
+        self.btn_creature_pick = QtWidgets.QPushButton("Pick Selected")
+        self.btn_creature_pick.setToolTip(
+            "Select one guide locator (e.g. C_spine_02_GUIDE, C_tail_03_GUIDE,\n"
+            "L_hindLeg_knee_GUIDE) or one joint, then click. The new limb\n"
+            "hangs off the joint that guide builds.")
+        self.creature_attach_edit = QtWidgets.QLineEdit()
+        self.creature_attach_edit.setReadOnly(True)
+        self.creature_attach_edit.setPlaceholderText(
+            "select a guide or joint, then Pick Selected")
+        ar.addWidget(self.btn_creature_pick)
+        ar.addWidget(self.creature_attach_edit, 1)
+        cr.addWidget(self.creature_attach_row)
+
+        # Arm-only options.
+        self.creature_arm_row = QtWidgets.QWidget()
+        arm_l = QtWidgets.QHBoxLayout(self.creature_arm_row)
+        arm_l.setContentsMargins(0, 0, 0, 0)
+        arm_l.addWidget(self.cb_creature_clavicle)
+        arm_l.addWidget(self.cb_creature_fingers)
+        arm_l.addStretch(1)
+        cr.addWidget(self.creature_arm_row)
+
+        # Chain-only options.
+        self.creature_chain_row = QtWidgets.QWidget()
+        ch = QtWidgets.QHBoxLayout(self.creature_chain_row)
+        ch.setContentsMargins(0, 0, 0, 0)
+        ch.addWidget(QtWidgets.QLabel("Joints:"))
+        self.creature_joints_spin = QtWidgets.QSpinBox()
+        self.creature_joints_spin.setRange(1, 40)
+        self.creature_joints_spin.setValue(5)
+        self.creature_joints_spin.setToolTip(
+            "Joints in the chain, each with its own FK control. A tip joint\n"
+            "is added at the end.")
+        ch.addWidget(self.creature_joints_spin)
+        ch.addSpacing(10)
+        ch.addWidget(QtWidgets.QLabel("Controls:"))
+        self.creature_controls_combo = QtWidgets.QComboBox()
+        self.creature_controls_combo.addItems(
+            ["FK + IK (switch)", "FK only", "IK only"])
+        self.creature_controls_combo.setToolTip(
+            "FK: one rotate control per joint (capes, tails, fingers).\n"
+            "IK: root / mid / tip spline controls you move around\n"
+            "(tentacles, antennae). Needs 2+ joints.\n"
+            "FK + IK: both, with an ikFkSwitch on the chain's settings.")
+        ch.addWidget(self.creature_controls_combo, 1)
+        cr.addWidget(self.creature_chain_row)
+
+        add_row = QtWidgets.QHBoxLayout()
+        self.btn_creature_add = QtWidgets.QPushButton("Add Limb Guides")
+        self.btn_creature_add.setToolTip(
+            "Arm / Leg / Tail: copies the biped's own guides into a new limb\n"
+            "under CREATURE_GUIDES_GRP, nudged aside so you can see it.\n"
+            "Chain: a row of guides starting at what it attaches to.\n"
+            "With 'Both (mirrored)' only the left side gets guides; the right\n"
+            "side is mirrored on Build Rig.")
+        self.btn_creature_from_joints = QtWidgets.QPushButton(
+            "From Selected Joints")
+        self.btn_creature_from_joints.setToolTip(
+            "Drew your own joints in Maya? Select the chain's ROOT joint and\n"
+            "click: chain guides land exactly on your joints (their count\n"
+            "sets the joint count). If your root sits under a rig joint and\n"
+            "Attach is Default, the chain attaches to that joint.")
+        add_row.addWidget(self.btn_creature_add, 1)
+        add_row.addWidget(self.btn_creature_from_joints, 1)
+        cr.addLayout(add_row)
+
+        self.creature_list = QtWidgets.QListWidget()
+        self.creature_list.setFixedHeight(84)
+        cr.addWidget(self.creature_list)
+        list_row = QtWidgets.QHBoxLayout()
+        self.btn_creature_select = QtWidgets.QPushButton("Select Guides")
+        self.btn_creature_remove = QtWidgets.QPushButton("Remove Limb")
+        list_row.addWidget(self.btn_creature_select)
+        list_row.addWidget(self.btn_creature_remove)
+        cr.addLayout(list_row)
+        creature_note = QtWidgets.QLabel(
+            "Move the new guides, then Build Rig. Extra limbs get their own "
+            "controls, auto-walk, space switching and a Creature tab in the "
+            "picker.")
+        creature_note.setWordWrap(True)
+        creature_note.setStyleSheet(ft.subtitle_css())
+        cr.addWidget(creature_note)
+        self.creature_box.setContentLayout(cr)
+        bl.addWidget(self.creature_box)
+
         # Source toggle
         source_row = QtWidgets.QHBoxLayout()
         self.rb_from_guides = QtWidgets.QRadioButton("Build from guides")
@@ -451,8 +644,9 @@ class RigBuilderUI(QtWidgets.QDialog):
         # Build / Delete buttons
         action_row = QtWidgets.QHBoxLayout()
         self.btn_build = QtWidgets.QPushButton("Build Rig")
+        self.btn_build.setObjectName("primary")
         self.btn_build.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; }"
+            "QPushButton { padding: 7px; }"
         )
         self.btn_delete_rig = QtWidgets.QPushButton("Delete Rig")
         action_row.addWidget(self.btn_build, 2)
@@ -468,7 +662,8 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_auto_skin_all = QtWidgets.QPushButton(
             "Auto-Skin Everything  (meshes → all joints)")
         self.btn_auto_skin_all.setStyleSheet(
-            "QPushButton { padding: 7px; font-weight: bold; color: #8fe28f; }")
+            "QPushButton { padding: 7px; font-weight: 600; color: %s; }"
+            % ft.OK)
         self.btn_auto_skin_all.setToolTip(
             "One click — no selection needed. Finds every mesh in the geo\n"
             "group, gathers every BIND joint (body + face), and Geodesic-\n"
@@ -518,7 +713,8 @@ class RigBuilderUI(QtWidgets.QDialog):
 
         self.btn_ng_init = QtWidgets.QPushButton(
             "Auto-Skin Mesh + Open NG Skin Tools")
-        self.btn_ng_init.setStyleSheet("QPushButton { color: #80c0ff; }")
+        self.btn_ng_init.setStyleSheet(
+            "QPushButton { color: %s; }" % ACCENT)
         self.btn_ng_init.setToolTip(
             "Geodesic-Voxel bind the selected mesh, init NG Skin Tools\n"
             "layers, and open the NG panel. Requires NG Skin Tools 2.")
@@ -547,8 +743,9 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_quad_reset = QtWidgets.QPushButton("Reset to Defaults")
         self.btn_quad_delete_guides = QtWidgets.QPushButton("Delete Guides")
         self.btn_quad_build = QtWidgets.QPushButton("Build Horse Rig")
+        self.btn_quad_build.setObjectName("primary")
         self.btn_quad_build.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; }")
+            "QPushButton { padding: 7px; }")
         self.btn_quad_delete_rig = QtWidgets.QPushButton("Delete Horse Rig")
 
         # Source toggle — build from guides or from baked-in defaults.
@@ -582,8 +779,9 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_bird_reset = QtWidgets.QPushButton("Reset to Defaults")
         self.btn_bird_delete_guides = QtWidgets.QPushButton("Delete Guides")
         self.btn_bird_build = QtWidgets.QPushButton("Build Raptor Rig")
+        self.btn_bird_build.setObjectName("primary")
         self.btn_bird_build.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; }")
+            "QPushButton { padding: 7px; }")
         self.btn_bird_delete_rig = QtWidgets.QPushButton("Delete Raptor Rig")
 
         # Source toggle — build from guides or from baked-in defaults.
@@ -624,8 +822,9 @@ class RigBuilderUI(QtWidgets.QDialog):
             "Delete Guides")
 
         self.btn_vehicle_build = QtWidgets.QPushButton("Build Vehicle Rig")
+        self.btn_vehicle_build.setObjectName("primary")
         self.btn_vehicle_build.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; }")
+            "QPushButton { padding: 7px; }")
         self.btn_vehicle_delete_rig = QtWidgets.QPushButton(
             "Delete Vehicle Rig")
 
@@ -696,10 +895,9 @@ class RigBuilderUI(QtWidgets.QDialog):
         # Live WASD driving — keyframes the car as you drive it.
         self.btn_vehicle_drive = QtWidgets.QPushButton(
             "🚗  Drive Mode (WASD)")
+        self.btn_vehicle_drive.setObjectName("primary")
         self.btn_vehicle_drive.setStyleSheet(
-            "QPushButton { background: #3a4f6a; color: #cfe0ff; "
-            "padding: 6px; font-weight: bold; border-radius: 3px; }"
-            "QPushButton:hover { background: #5c80b0; color: white; }")
+            "QPushButton { padding: 6px; }")
         self.btn_vehicle_drive.setToolTip(
             "Open the live drive panel. W/S accelerate+brake, A/D steer,\n"
             "Esc stops. Every frame is keyframed — drive around, stop,\n"
@@ -763,7 +961,7 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_game_skeleton = QtWidgets.QPushButton(
             "Make Game Skeleton (root + clean hierarchy)")
         self.btn_game_skeleton.setStyleSheet(
-            "QPushButton { padding: 4px; }")
+            "QPushButton { padding: 5px; }")
         self.btn_game_skeleton.setToolTip(
             "Reparent every loose BIND chain (pelvis, chest, etc.) under\n"
             "C_root_BIND_JNT so the skeleton has a single root for FBX\n"
@@ -773,7 +971,7 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_export_rig = QtWidgets.QPushButton(
             "Export Rig (.fbx)…")
         self.btn_export_rig.setStyleSheet(
-            "QPushButton { padding: 6px; font-weight: bold; }")
+            "QPushButton { padding: 6px; font-weight: 600; }")
         self.btn_export_rig.setToolTip(
             "Export the BIND skeleton + skinned mesh as an FBX file\n"
             "ready for Unreal / Unity. Picks a save path; runs the\n"
@@ -782,7 +980,7 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_export_anim = QtWidgets.QPushButton(
             "Export Animation (.fbx)…")
         self.btn_export_anim.setStyleSheet(
-            "QPushButton { padding: 6px; font-weight: bold; }")
+            "QPushButton { padding: 6px; font-weight: 600; }")
         self.btn_export_anim.setToolTip(
             "Bake every BIND joint's animation over the current\n"
             "playback range, then export as FBX (animation-only).\n"
@@ -857,7 +1055,7 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_skin_grad_auto = QtWidgets.QPushButton(
             "Gradient Skin: All Bones  (one-click falloff)")
         self.btn_skin_grad_auto.setStyleSheet(
-            "QPushButton { color: #9fe09f; }")
+            "QPushButton { color: %s; }" % ft.OK)
         self.btn_skin_grad_auto.setToolTip(
             "One click: skin the selected mesh to the WHOLE skeleton with a\n"
             "smooth BONE FALLOFF — each bone's MIDDLE is full weight to its\n"
@@ -873,8 +1071,8 @@ class RigBuilderUI(QtWidgets.QDialog):
         exp_lbl = QtWidgets.QLabel("⚠  Experimental  —  gradient bone-falloff "
                                    "(smooth it after)")
         exp_lbl.setStyleSheet(
-            "QLabel { color: #e0a040; font-weight: bold; padding-top: 6px; "
-            "border-top: 1px solid #555; }")
+            "QLabel { color: %s; font-weight: 600; padding-top: 6px; "
+            "border-top: 1px solid %s; }" % (ft.WARN, ft.BORDER))
 
         sl.addWidget(self.btn_skin_bind,       0, 0, 1, 2)
         sl.addWidget(self.btn_skin_mirror_lr,  1, 0)
@@ -925,8 +1123,8 @@ class RigBuilderUI(QtWidgets.QDialog):
 
         # ---- Pose library ----
         pose_hdr = QtWidgets.QLabel("Pose Library")
-        pose_hdr.setStyleSheet("QLabel { color: #8ab; font-weight: bold; "
-                               "padding-top: 4px; }")
+        pose_hdr.setStyleSheet("QLabel { color: %s; font-weight: 600; "
+                               "padding-top: 4px; }" % ft.MUTED)
         self.pose_name = QtWidgets.QLineEdit()
         self.pose_name.setPlaceholderText("pose name…")
         self.btn_pose_save = QtWidgets.QPushButton("Save Pose")
@@ -1021,8 +1219,8 @@ class RigBuilderUI(QtWidgets.QDialog):
         # ---------- STATUS ----------
         self.status = QtWidgets.QLabel("")
         self.status.setStyleSheet(
-            "QLabel { color: #aaa; padding: 4px; "
-            "border-top: 1px solid #444; }"
+            "QLabel { color: %s; padding: 4px; "
+            "border-top: 1px solid %s; }" % (ft.MUTED, ft.BORDER)
         )
         root.addWidget(self.status)
         root.addStretch(1)
@@ -1138,8 +1336,27 @@ class RigBuilderUI(QtWidgets.QDialog):
         self.btn_delete_guides.clicked.connect(self._on_delete_guides)
         self.btn_toggle_labels.clicked.connect(self._on_toggle_labels)
         self.cb_symmetric.toggled.connect(self._on_symmetric_toggled)
+        self.guide_mode_combo.blockSignals(True)
+        self.guide_mode_combo.setCurrentIndex(
+            1 if self.guide_system.is_ez_mode() else 0)
+        self.guide_mode_combo.blockSignals(False)
+        self.guide_mode_combo.currentIndexChanged.connect(
+            self._on_guide_mode_changed)
         self.btn_build.clicked.connect(self._on_build)
         self.btn_delete_rig.clicked.connect(self._on_delete_rig)
+        self.btn_creature_preset.clicked.connect(self._on_creature_preset)
+        self.btn_creature_add.clicked.connect(self._on_creature_add)
+        self.btn_creature_select.clicked.connect(self._on_creature_select)
+        self.btn_creature_remove.clicked.connect(self._on_creature_remove)
+        self.creature_type_combo.currentIndexChanged.connect(
+            self._on_creature_type_changed)
+        self.creature_parent_combo.currentIndexChanged.connect(
+            self._on_creature_parent_changed)
+        self.btn_creature_pick.clicked.connect(self._on_creature_pick)
+        self.btn_creature_from_joints.clicked.connect(
+            self._on_creature_from_joints)
+        self._on_creature_type_changed()
+        self._refresh_creature_list()
         self.btn_verify.clicked.connect(self._on_verify)
         self.btn_select_skin_jnts.clicked.connect(self._on_select_skin_joints)
         self.btn_smooth_bind.clicked.connect(self._on_smooth_bind)
@@ -1254,9 +1471,24 @@ class RigBuilderUI(QtWidgets.QDialog):
         try:
             with undo_chunk():
                 self.guide_system.build()
+                if self.guide_mode_combo.currentIndex() == 1:
+                    rig_creature.set_guide_mode(True)
             self._info("Guides created.")
         except Exception as e:
             cmds.warning(f"Guide creation failed: {e}")
+
+    def _on_guide_mode_changed(self, index):
+        ez = index == 1
+        if not (cmds.objExists("RIG_GUIDES_GRP")
+                or rig_creature.list_limbs()):
+            self._info(f"{'EZ' if ez else 'Free'} guide mode will apply when "
+                       f"you create guides.")
+            return
+        with undo_chunk():
+            rig_creature.set_guide_mode(ez)
+        self._info("EZ guide mode: guides linked, move a parent and its "
+                   "children follow." if ez else
+                   "Free guide mode: every guide moves on its own.")
 
     def _on_mirror(self):
         with undo_chunk():
@@ -1378,6 +1610,9 @@ class RigBuilderUI(QtWidgets.QDialog):
                 face_heavy=False,
                 face_lid_joints_per_arc=self.lid_jnts_spin.value(),
                 face_lip_joints_per_curve=self.lip_jnts_spin.value(),
+                # Creature guides, if any (their positions are used as-is,
+                # whichever build source is picked above).
+                extra_limbs=rig_creature.read_extra_limbs(),
             )
             self.rig.build()
             # An advanced face that existed BEFORE this build is now wired
@@ -1405,6 +1640,184 @@ class RigBuilderUI(QtWidgets.QDialog):
             raise
         finally:
             cmds.undoInfo(closeChunk=True)
+
+    # -----------------------------------------------------------------------
+    # Slots: Creature limbs
+    # -----------------------------------------------------------------------
+
+    _CREATURE_PARENTS = (None, "chest", "pelvis", "cog", "head", "custom")
+    _CREATURE_KINDS = ("arm", "leg", "tail", "chain")
+    _CREATURE_CONTROLS = ("fkik", "fk", "ik")
+    # (combo text, side code) per limb type
+    _SIDE_ITEMS = [("Both (mirrored)", "LR"), ("Left only", "L"),
+                   ("Right only", "R")]
+    _CHAIN_SIDE_ITEMS = _SIDE_ITEMS + [("Centre (one chain)", "C")]
+
+    def _creature_kind(self):
+        return self._CREATURE_KINDS[self.creature_type_combo.currentIndex()]
+
+    def _on_creature_type_changed(self, *_):
+        kind = self._creature_kind()
+        self.creature_arm_row.setVisible(kind == "arm")
+        self.creature_chain_row.setVisible(kind == "chain")
+        self.btn_creature_from_joints.setVisible(kind == "chain")
+        self.btn_creature_add.setText("Add Chain Guides" if kind == "chain"
+                                      else "Add Limb Guides")
+        prev = self.creature_side_combo.currentData()
+        self.creature_side_combo.blockSignals(True)
+        self.creature_side_combo.clear()
+        items = self._CHAIN_SIDE_ITEMS if kind == "chain" else self._SIDE_ITEMS
+        for text, code in items:
+            self.creature_side_combo.addItem(text, code)
+        idx = self.creature_side_combo.findData(prev)
+        self.creature_side_combo.setCurrentIndex(max(idx, 0))
+        self.creature_side_combo.blockSignals(False)
+        self.creature_side_combo.setEnabled(kind != "tail")
+        self._on_creature_parent_changed()
+
+    def _on_creature_parent_changed(self, *_):
+        custom = (self._CREATURE_PARENTS[
+            self.creature_parent_combo.currentIndex()] == "custom")
+        self.creature_attach_row.setVisible(custom)
+
+    def _on_creature_pick(self):
+        try:
+            target = rig_creature.selected_attach()
+        except ValueError as e:
+            cmds.warning(f"Can't attach: {e}")
+            return
+        self.creature_attach_edit.setText(target)
+        self._info(f"New limbs will attach to "
+                   f"{rig_creature.attach_label(target)}.")
+
+    def _creature_attach_args(self):
+        """(parent, attach) from the Attach combo; raises ValueError if
+        Custom is chosen with nothing picked."""
+        parent = self._CREATURE_PARENTS[
+            self.creature_parent_combo.currentIndex()]
+        if parent != "custom":
+            return parent, None
+        target = self.creature_attach_edit.text().strip()
+        if not target:
+            raise ValueError("Attach is Custom: select a guide or joint and "
+                             "click Pick Selected first")
+        return None, target
+
+    def _refresh_creature_list(self):
+        self.creature_list.clear()
+        for limb in rig_creature.list_limbs():
+            bits = [limb["type"]]
+            if limb["type"] == "chain":
+                bits.append("%d joints, %s" % (
+                    limb.get("joints", 1),
+                    {"fkik": "FK + IK", "fk": "FK", "ik": "IK"}.get(
+                        limb.get("controls"), "FK + IK")))
+            bits.append({"LR": "both sides", "L": "left", "R": "right"}.get(
+                limb.get("side"), "centre"))
+            on = (rig_creature.attach_label(limb.get("attach"))
+                  if limb["parent"] == rig_creature.CUSTOM else limb["parent"])
+            bits.append("on " + on)
+            bits += [k for k in ("clavicle", "fingers") if limb.get(k)]
+            item = QtWidgets.QListWidgetItem(
+                "%s  (%s)" % (limb["label"], ", ".join(bits)))
+            item.setData(QtCore.Qt.UserRole, limb["label"])
+            self.creature_list.addItem(item)
+
+    def _selected_creature_label(self):
+        item = self.creature_list.currentItem()
+        return item.data(QtCore.Qt.UserRole) if item else None
+
+    def _on_creature_add(self):
+        label = self.creature_label_edit.text().strip()
+        kind = self._creature_kind()
+        # Nudge each new limb aside so it doesn't sit on top of the one it
+        # was copied from. (Chains start at what they attach to.)
+        offset = {"arm": (0, -20, 0), "leg": (0, 0, -25),
+                  "tail": (8, 0, 0), "chain": (0, 0, 0)}[kind]
+        try:
+            parent, attach = self._creature_attach_args()
+            with undo_chunk():
+                rig_creature.add_limb(
+                    kind, label,
+                    side=self.creature_side_combo.currentData() or "LR",
+                    parent=parent, attach=attach, offset=offset,
+                    clavicle=self.cb_creature_clavicle.isChecked(),
+                    fingers=self.cb_creature_fingers.isChecked(),
+                    joints=self.creature_joints_spin.value(),
+                    controls=self._CREATURE_CONTROLS[
+                        self.creature_controls_combo.currentIndex()])
+        except ValueError as e:
+            cmds.warning(f"Can't add {kind}: {e}")
+            return
+        self.creature_label_edit.clear()
+        self._refresh_creature_list()
+        self._info(f"Added {kind} '{label}' guides. Move them, then Build Rig.")
+
+    def _on_creature_from_joints(self):
+        label = self.creature_label_edit.text().strip()
+        joints = cmds.ls(sl=True, type="joint") or []
+        if len(joints) != 1:
+            cmds.warning("Select the ROOT joint of the chain you drew "
+                         "(exactly one joint).")
+            return
+        try:
+            parent, attach = self._creature_attach_args()
+            with undo_chunk():
+                rig_creature.chain_from_joints(
+                    joints[0], label,
+                    side=self.creature_side_combo.currentData() or "C",
+                    controls=self._CREATURE_CONTROLS[
+                        self.creature_controls_combo.currentIndex()],
+                    parent=parent, attach=attach)
+        except ValueError as e:
+            cmds.warning(f"Can't make chain: {e}")
+            return
+        self.creature_label_edit.clear()
+        self._refresh_creature_list()
+        self._info(f"Chain '{label}' guides placed on your joints. You can "
+                   f"delete the joints you drew, then Build Rig.")
+
+    def _on_creature_preset(self):
+        name = self.creature_preset_combo.currentText()
+        try:
+            with undo_chunk():
+                labels = rig_creature.add_preset(name)
+        except ValueError as e:
+            cmds.warning(f"Can't add preset {name}: {e}")
+            return
+        off = rig_creature.PRESETS[name].get("modules_off", [])
+        module_boxes = {"tail": self.cb_tail, "legs": self.cb_legs,
+                        "arms": self.cb_arms, "fingers": self.cb_fingers}
+        for mod in off:
+            if mod in module_boxes:
+                module_boxes[mod].setChecked(False)
+        self._refresh_creature_list()
+        self._info(f"{name}: added {', '.join(labels)}"
+                   + (f" (turned off the {', '.join(off)} module)" if off
+                      else "") + ". Move the guides, then Build Rig.")
+
+    def _on_creature_select(self):
+        label = self._selected_creature_label()
+        if not label:
+            cmds.warning("Pick a limb in the list first.")
+            return
+        rig_creature.select_limb(label)
+
+    def _on_creature_remove(self):
+        label = self._selected_creature_label()
+        if not label:
+            cmds.warning("Pick a limb in the list first.")
+            return
+        deps = rig_creature.dependents(label)
+        with undo_chunk():
+            rig_creature.remove_limb(label)
+        self._refresh_creature_list()
+        if deps:
+            cmds.warning(f"{', '.join(deps)} attached to '{label}'. Pick a "
+                         f"new attach for them (remove and re-add) or Build "
+                         f"Rig will stop with a missing-joint message.")
+        self._info(f"Removed the '{label}' limb guides. Rebuild the rig to "
+                   f"drop it from the rig too.")
 
     def _on_delete_rig(self):
         if not cmds.objExists("CHARACTER_RIG_GRP"):
@@ -2416,12 +2829,12 @@ def _reload_submodules():
         from importlib import reload
         import rig_ui; reload(rig_ui); rig_ui.show()
     """
-    for mod in (rig_guides, character_rig_builder,
+    for mod in (ft, rig_guides, character_rig_builder,
                 quadruped_guides, quadruped_rig_builder,
                 bird_guides, bird_rig_builder,
                 vehicle_guides, vehicle_rig_builder, vehicle_drive,
                 advanced_face_ui,
-                rig_export, rig_picker, rig_info):
+                rig_export, rig_creature, rig_picker, rig_info):
         try:
             reload(mod)
         except Exception as e:

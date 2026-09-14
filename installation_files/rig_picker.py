@@ -24,6 +24,7 @@
 import contextlib
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
+import forge_theme as ft
 try:
     from PySide2 import QtCore, QtWidgets, QtGui
     from shiboken2 import wrapInstance
@@ -32,8 +33,10 @@ except ImportError:                                  # Maya 2025+ (Qt6)
     from shiboken6 import wrapInstance
 
 import rig_pose_tools
+import rig_creature
 from importlib import reload as _reload
 _reload(rig_pose_tools)
+_reload(rig_creature)
 
 
 WINDOW_OBJECT_NAME = "DanyalRigPickerWindow"
@@ -619,6 +622,25 @@ class RigPickerUI(QtWidgets.QDialog):
 
         self.tabs.addTab(face_holder, "Face")
 
+        # --- Creature tab: extra arms / legs / tails (auto-laid-out) ---
+        self.creature_canvas = PickerCanvas(460, 120)
+        self.creature_holder = QtWidgets.QWidget()
+        ch_layout = QtWidgets.QVBoxLayout(self.creature_holder)
+        ch_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(False)
+        scroll.setAlignment(QtCore.Qt.AlignHCenter)
+        scroll.setWidget(self.creature_canvas)
+        scroll.setMinimumHeight(300)
+        ch_layout.addWidget(scroll, 1)
+        self.creature_ikfk_box = QtWidgets.QGroupBox(
+            "IK/FK match (keep pose), extra limbs")
+        self.creature_ikfk_lay = QtWidgets.QGridLayout(self.creature_ikfk_box)
+        self.creature_ikfk_lay.setSpacing(4)
+        ch_layout.addWidget(self.creature_ikfk_box)
+        self.creature_tab_index = self.tabs.addTab(self.creature_holder,
+                                                   "Creature")
+
         # Status row at the bottom
         self.status = QtWidgets.QLabel("Click a button to select. "
                                        "Shift = add, Ctrl = toggle.")
@@ -638,6 +660,7 @@ class RigPickerUI(QtWidgets.QDialog):
         self._refresh_face_sliders()
 
         rig_top = detect_rig()
+        self._refresh_creature(rig_top == "CHARACTER_RIG_GRP")
         if not rig_top:
             self.rig_label.setText("(no rig in scene — build one first)")
             self.status.setText(
@@ -682,6 +705,36 @@ class RigPickerUI(QtWidgets.QDialog):
             self.status.setText(f"{msg} ({n} ctrls).")
         except Exception as e:
             cmds.warning(f"[picker] pose mirror failed: {e}")
+
+    def _refresh_creature(self, is_biped):
+        """Rebuild the Creature tab from the extra limbs on the built rig.
+        The tab is hidden when the rig has none."""
+        self.creature_canvas.clear()
+        while self.creature_ikfk_lay.count():
+            w = self.creature_ikfk_lay.takeAt(0).widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+        limbs = rig_creature.scene_extra_limbs() if is_biped else []
+        entries, height, prefixes = rig_creature.picker_layout(limbs)
+        self.creature_canvas.setFixedSize(460, height)
+        for ctrl, lbl, x, y, w, h, color in entries:
+            self.creature_canvas.add(ctrl, lbl, x, y, w, h, color)
+        for i, prefix in enumerate(prefixes):
+            b = QtWidgets.QPushButton(prefix.replace("_", " ", 1))
+            b.setToolTip(f"Switch {prefix} between IK and FK while keeping "
+                         f"the current pose (no pop).")
+            b.clicked.connect(lambda _=False, p=prefix: self._do_ikfk(p))
+            self.creature_ikfk_lay.addWidget(b, i // 2, i % 2)
+        self.creature_ikfk_box.setVisible(bool(prefixes))
+        show = bool(limbs)
+        if hasattr(self.tabs, "setTabVisible"):
+            self.tabs.setTabVisible(self.creature_tab_index, show)
+        else:
+            self.tabs.setTabEnabled(self.creature_tab_index, show)
+        if limbs:
+            self.tabs.setTabText(self.creature_tab_index,
+                                 "Creature (%d)" % len(limbs))
 
     def _do_ikfk(self, prefix):
         try:

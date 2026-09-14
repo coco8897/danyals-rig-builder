@@ -67,6 +67,32 @@ def biped_config():
         "C_head_CTRL", "C_head_OFFSET",
         [("C_neck_CTRL", "Neck"), ("C_spine_chest_CTRL", "Chest"),
          ("C_cog_CTRL", "COG"), ("C_global_CTRL", "World")], 0))
+    cfg += _extra_limb_config()
+    return cfg
+
+
+def _extra_limb_config():
+    """Same hand/foot/pole spaces for labelled extra limbs (four-armed,
+    centaur...), found by name: an L_/R_ prefix with its own IK ctrl and a
+    wrist (arm) or ankle (leg) joint."""
+    cfg = []
+    for ik in sorted(cmds.ls("L_*_IK_CTRL", "R_*_IK_CTRL",
+                             type="transform") or []):
+        prefix = ik[:-len("_IK_CTRL")]
+        if prefix[2:] in ("arm", "leg") or "_" in prefix[2:]:
+            continue                      # base limbs, or not a limb prefix
+        if cmds.objExists(f"{prefix}_wrist_BIND_JNT"):
+            local, nice, pv_nice = "C_spine_chest_CTRL", "Chest", "Hand"
+        elif cmds.objExists(f"{prefix}_ankle_BIND_JNT"):
+            local, nice, pv_nice = "C_spine_hip_CTRL", "Hips", "Foot"
+        else:
+            continue
+        cfg.append((ik, f"{prefix}_IK_OFFSET",
+                    [("C_global_CTRL", "World"), ("C_cog_CTRL", "COG"),
+                     (local, nice)], 0))
+        cfg.append((f"{prefix}_PV_CTRL", f"{prefix}_PV_OFFSET",
+                    [("C_global_CTRL", "World"), (ik, pv_nice),
+                     ("C_cog_CTRL", "COG")], 0))
     return cfg
 
 

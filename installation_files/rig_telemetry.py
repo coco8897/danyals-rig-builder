@@ -32,7 +32,7 @@ import platform
 import threading
 import uuid
 
-TOOL_VERSION = "1.0.1"
+TOOL_VERSION = "1.0.2"
 TELEMETRY_ENABLED = True
 
 # The collection endpoint (a URL the author controls — a Google Apps Script

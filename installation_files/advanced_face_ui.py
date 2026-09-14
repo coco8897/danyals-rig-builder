@@ -29,6 +29,7 @@ except ImportError:                                  # Maya 2025+ (Qt6)
     from shiboken6 import wrapInstance
 
 import advanced_face
+import forge_theme as ft
 import rig_face_presets
 from importlib import reload as _reload
 _reload(advanced_face)
@@ -65,6 +66,7 @@ class AdvancedFaceUI(QtWidgets.QDialog):
         super(AdvancedFaceUI, self).__init__(parent or _maya_main_window())
         self.setObjectName(WINDOW_OBJECT_NAME)
         self.setWindowTitle("Advanced Face (mesh-conforming)")
+        self.setStyleSheet(ft.style(ft.ACCENT_RIG))
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.Window)
         self.setMinimumWidth(320)
 
@@ -88,13 +90,20 @@ class AdvancedFaceUI(QtWidgets.QDialog):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
 
+        _title = QtWidgets.QLabel("ADVANCED FACE")
+        _title.setObjectName("title")
+        root.addWidget(_title)
+        _sub = QtWidgets.QLabel("mesh-conforming eyes + mouth")
+        _sub.setObjectName("subtitle")
+        root.addWidget(_sub)
+
         intro = QtWidgets.QLabel(
             "Mesh-conforming heavy face. Select the WHOLE eye (or mouth) "
             "edge loop on your mesh, then click Fit — it auto-splits the "
             "loop into the upper + lower halves. Fitted features turn green. "
             "Build when ready.")
         intro.setWordWrap(True)
-        intro.setStyleSheet("QLabel { color: #bbb; }")
+        intro.setStyleSheet("QLabel { color: %s; }" % ft.MUTED)
         root.addWidget(intro)
 
         # Head / jaw joint fields (the detail joints constrain to these).
@@ -178,8 +187,8 @@ class AdvancedFaceUI(QtWidgets.QDialog):
         # Build / clear
         brow = QtWidgets.QHBoxLayout()
         self.btn_build = QtWidgets.QPushButton("Build Advanced Face")
-        self.btn_build.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; }")
+        self.btn_build.setObjectName("primary")
+        self.btn_build.setStyleSheet("QPushButton { padding: 7px; }")
         self.btn_build.clicked.connect(self._on_build)
         self.btn_clear = QtWidgets.QPushButton("Delete / Reset")
         self.btn_clear.clicked.connect(self._on_clear)
@@ -200,9 +209,9 @@ class AdvancedFaceUI(QtWidgets.QDialog):
         # One-click skin: select the mesh -> bind to the face joints.
         self.btn_bind = QtWidgets.QPushButton(
             "Bind Selected Face Mesh  →  Face Joints")
+        self.btn_bind.setObjectName("primary")
         self.btn_bind.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 6px; "
-            "background: #2d4a5a; }")
+            "QPushButton { padding: 7px; }")
         self.btn_bind.setToolTip(
             "Select your face geo in the viewport, then click this. It\n"
             "smooth-binds the mesh to every face joint (lids, lips, head,\n"
@@ -249,8 +258,8 @@ class AdvancedFaceUI(QtWidgets.QDialog):
 
         self.status = QtWidgets.QLabel("")
         self.status.setStyleSheet(
-            "QLabel { color: #8a8; padding-top: 4px; "
-            "border-top: 1px solid #444; }")
+            "QLabel { color: %s; padding-top: 4px; "
+            "border-top: 1px solid %s; }" % (ft.OK, ft.BORDER))
         root.addWidget(self.status)
 
         self.adjustSize()
@@ -457,15 +466,17 @@ class AdvancedFaceUI(QtWidgets.QDialog):
             done = bool(regions) and all(r in fitted for r in regions)
             lbl = self.findChild(QtWidgets.QLabel, f"state_{fid}")
             if done:
-                btn.setStyleSheet("QPushButton { background: #2d5a2d; }")
+                btn.setStyleSheet(
+                    "QPushButton { border-color: %s; color: %s; }"
+                    % (ft.OK, ft.OK))
                 if lbl:
                     lbl.setText("[x]")
-                    lbl.setStyleSheet("QLabel { color: #6f6; }")
+                    lbl.setStyleSheet("QLabel { color: %s; }" % ft.OK)
             else:
                 btn.setStyleSheet("")
                 if lbl:
                     lbl.setText("[ ]")
-                    lbl.setStyleSheet("QLabel { color: #777; }")
+                    lbl.setStyleSheet("QLabel { color: %s; }" % ft.DISABLED)
 
 
 _win = None

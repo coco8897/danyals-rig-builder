@@ -52,6 +52,7 @@
 """
 
 import math
+import re
 import maya.cmds as cmds
 import maya.api.OpenMaya as om
 
@@ -214,6 +215,41 @@ def lock_hide_attrs(node, attrs):
             cmds.setAttr(f"{node}.{a}", l=True, k=False, cb=False)
         except Exception:
             pass
+
+
+def add_fk_length(ctrl, child_offset, name):
+    """Give an FK ctrl a keyable `length` (1 = rest) that slides the next FK
+    ctrl's offset down the bone. Stretchy IK lengthens the IK joints'
+    translateX; FK has no other way to lengthen (ctrl translate + scale are
+    locked), so without this an IK -> FK match can't hold a stretched limb.
+    The FK joint follows its ctrl, and the BIND tx blend already reads FK tx.
+    """
+    cmds.addAttr(ctrl, ln="length", at="double", min=0.01, dv=1.0, k=True)
+    rest = cmds.getAttr(f"{child_offset}.translate")[0]
+    md = cmds.createNode("multiplyDivide", n=name)
+    cmds.setAttr(f"{md}.input1", *rest)
+    for ax in "XYZ":
+        cmds.connectAttr(f"{ctrl}.length", f"{md}.input2{ax}")
+    cmds.connectAttr(f"{md}.output", f"{child_offset}.translate", f=True)
+    return md
+
+
+def make_stretch_anchor(chain_root, parent_jnt, name):
+    """Empty transform ON an IK chain's root joint (shoulder / hip), parented
+    under the chain's parent joint, for stretchy IK to measure from.
+
+    parent_jnt itself is only a valid start point when it sits on the root:
+    a pelvis is not the hip and a chest is not the shoulder, so its distance
+    to the IK target changes by a different ratio than root -> target does
+    and the IK end misses (legs, clavicle-less extra arms). The root joint
+    can't be used either, the IK solver writes its rotate (a cycle). The
+    root's translate is fixed under parent_jnt, so this rides exactly on it
+    while depending only on parent_jnt.
+    """
+    anchor = cmds.createNode("transform", n=name, p=parent_jnt, ss=True)
+    cmds.xform(anchor, ws=True,
+               t=cmds.xform(chain_root, q=True, ws=True, t=True))
+    return anchor
 
 
 def get_pole_vector_position(start, mid, end, distance=5.0):
@@ -1104,8 +1140,14 @@ class ClavicleRig(object):
 
     def __init__(self, side, positions=None,
                  parent_ctrl=None, parent_jnt=None,
-                 ctrl_grp=None, jnt_grp=None):
+                 ctrl_grp=None, jnt_grp=None, label=None):
+        # `label` (optional): builds a SECOND instance with unique names, e.g.
+        # label="lowerArm" -> L_lowerArm_*. Unset = the classic names, so
+        # existing rigs, poses, pickers and space switches are untouched.
         self.side = side
+        self.label = label
+        self.base = (f"{side}_{label}_clavicle" if label
+                     else f"{side}_clavicle")
         mult = 1 if side == "L" else -1
         self.positions = positions or {
             "clavicle":      ( 5.0 * mult, 140.0, 2.0),
@@ -1123,11 +1165,11 @@ class ClavicleRig(object):
     def build(self):
         cmds.select(cl=True)
         self.bind_jnt = cmds.joint(
-            n=f"{self.side}_clavicle_BIND_JNT",
+            n=f"{self.base}_BIND_JNT",
             p=self.positions["clavicle"],
         )
         self.tip_jnt = cmds.joint(
-            n=f"{self.side}_clavicle_tip_BIND_JNT",
+            n=f"{self.base}_tip_BIND_JNT",
             p=self.positions["clavicle_tip"],
         )
         cmds.joint(self.bind_jnt, e=True, oj="xyz", sao="yup",
@@ -1137,7 +1179,7 @@ class ClavicleRig(object):
 
         # Ctrl shape pointing outward
         self.ctrl = create_clavicle_ctrl(
-            f"{self.side}_clavicle_CTRL",
+            f"{self.base}_CTRL",
             size=1.5 * SCALE * (1 if self.side == "L" else -1), color=self.color,
         )
         cmds.matchTransform(self.ctrl, self.bind_jnt, pos=True, rot=False)
@@ -1157,10 +1199,14 @@ class ArmRig(object):
     def __init__(self, side="L", positions=None, bendy_count=5,
                  parent_ctrl=None, parent_jnt=None,
                  ctrl_grp=None, jnt_grp=None, misc_grp=None,
-                 finger_positions=None):
+                 finger_positions=None, label=None):
         assert side in ("L", "R")
+        # `label` (optional): builds a SECOND instance with unique names, e.g.
+        # label="lowerArm" -> L_lowerArm_*. Unset = the classic names, so
+        # existing rigs, poses, pickers and space switches are untouched.
         self.side = side
-        self.prefix = f"{side}_arm"
+        self.label = label
+        self.prefix = f"{side}_{label}" if label else f"{side}_arm"
         self.bendy_count = bendy_count
         mult = 1 if side == "L" else -1
         self.positions = positions or {
@@ -1328,6 +1374,9 @@ class ArmRig(object):
                            wrist_bind, finger_parent, settings):
         """Build joints + ctrls + SDK for a single finger."""
         side = self.side
+        # finger roots are side-built (L_indexProx...), so a labelled arm
+        # needs its own token: L_lowerArm_indexProx...
+        fside = f"{side}_{self.label}" if self.label else side
         cap = lambda s: s[0].upper() + s[1:]
 
         # ---- BIND chain (meta → ... → dist → tip) ----
@@ -1335,12 +1384,12 @@ class ArmRig(object):
         bind_jnts = []
         for slot in slots:
             j = cmds.joint(
-                n=f"{side}_{finger_name}{cap(slot)}_BIND_JNT",
+                n=f"{fside}_{finger_name}{cap(slot)}_BIND_JNT",
                 p=positions[slot],
             )
             bind_jnts.append(j)
         tip_jnt = cmds.joint(
-            n=f"{side}_{finger_name}Tip_BIND_JNT",
+            n=f"{fside}_{finger_name}Tip_BIND_JNT",
             p=positions["tip"],
         )
         # Auto-orient the chain: X aims down the bone, Y up.
@@ -1365,7 +1414,7 @@ class ArmRig(object):
         prev_ctrl = finger_parent
         for slot, bind in zip(slots, bind_jnts):
             ctrl = create_circle_ctrl(
-                f"{side}_{finger_name}{cap(slot)}_FK_CTRL",
+                f"{fside}_{finger_name}{cap(slot)}_FK_CTRL",
                 radius=0.2 * SCALE, normal=(1, 0, 0),
                 color=self.color,
             )
@@ -1395,12 +1444,12 @@ class ArmRig(object):
                 continue
             sum_node = cmds.createNode(
                 "plusMinusAverage",
-                n=f"{side}_{finger_name}{cap(slot)}_curlSum_PMA")
+                n=f"{fside}_{finger_name}{cap(slot)}_curlSum_PMA")
             cmds.connectAttr(fist_curl_attr,   f"{sum_node}.input1D[0]")
             cmds.connectAttr(finger_curl_attr, f"{sum_node}.input1D[1]")
             mul = cmds.createNode(
                 "multDoubleLinear",
-                n=f"{side}_{finger_name}{cap(slot)}_curl_MUL")
+                n=f"{fside}_{finger_name}{cap(slot)}_curl_MUL")
             cmds.connectAttr(f"{sum_node}.output1D", f"{mul}.input1")
             cmds.setAttr(f"{mul}.input2", weight)
             cmds.connectAttr(f"{mul}.output", f"{auto}.rotateZ")
@@ -1411,7 +1460,7 @@ class ArmRig(object):
             meta_auto = fk_ctrls[0][2]
             spread_mul = cmds.createNode(
                 "multDoubleLinear",
-                n=f"{side}_{finger_name}_spread_MUL")
+                n=f"{fside}_{finger_name}_spread_MUL")
             cmds.connectAttr(f"{settings}.spread",
                               f"{spread_mul}.input1")
             cmds.setAttr(f"{spread_mul}.input2", spread_weight)
@@ -1469,6 +1518,10 @@ class ArmRig(object):
                                    "sx", "sy", "sz", "v"])
             self.fk_ctrls.append(ctrl)
             self.fk_offsets.append(offset)
+        # Upper/lower arm length, so FK can hold what stretchy IK does.
+        for i, part in ((1, "shoulder"), (2, "elbow")):
+            add_fk_length(self.fk_ctrls[i - 1], self.fk_offsets[i],
+                          f"{self.prefix}_{part}_fkLength_MD")
 
     def _create_ik(self):
         self.ik_handle = cmds.ikHandle(
@@ -1535,24 +1588,25 @@ class ArmRig(object):
         elbow_t = cmds.getAttr(f"{self.ik_jnts[1]}.translateX")
         wrist_t = cmds.getAttr(f"{self.ik_jnts[2]}.translateX")
 
-        # Rest length = ACTUAL world distance from parent_jnt to ik_ctrl at
-        # build time. Using sum-of-bone-lengths breaks when parent_jnt is
-        # offset from the chain root (e.g. clavicle_tip moved away from
-        # shoulder) — at rest the measured distance exceeds the bone sum,
-        # forcing ratio > 1 and over-stretching the BIND chain.
-        parent_pos = cmds.xform(self.parent_jnt, q=True, ws=True, t=True)
-        ctrl_pos   = cmds.xform(self.ik_ctrl,    q=True, ws=True, t=True)
+        # Measure from an anchor on the shoulder (see make_stretch_anchor).
+        # With a clavicle, parent_jnt is its tip, already on the shoulder;
+        # a clavicle-less extra arm hangs off the chest, which is not.
+        # Not ik_jnts[0]: the IK solver writes its rotate, which would feed
+        # back into this distance, into the stretch, and into
+        # ik_jnts[1..2].translateX, re-triggering the solver.
+        anchor = make_stretch_anchor(self.ik_jnts[0], self.parent_jnt,
+                                     f"{self.prefix}_stretch_ANCHOR")
+
+        # Rest length = ACTUAL world distance from the anchor to ik_ctrl at
+        # build time, so ratio is exactly 1.0 in the rest pose.
+        anchor_pos = cmds.xform(anchor,       q=True, ws=True, t=True)
+        ctrl_pos   = cmds.xform(self.ik_ctrl, q=True, ws=True, t=True)
         rest_length = math.sqrt(sum((p - c) ** 2
-                                    for p, c in zip(parent_pos, ctrl_pos)))
+                                    for p, c in zip(anchor_pos, ctrl_pos)))
 
         dist = cmds.createNode("distanceBetween",
                                n=f"{self.prefix}_stretch_DIST")
-        # Use parent_jnt (clavicle_tip) instead of ik_jnts[0] to avoid an
-        # evaluation cycle: the IK solver writes to ik_jnts[0].rotate which
-        # would feed back into this distance, into the stretch, and into
-        # ik_jnts[1..2].translateX, re-triggering the solver.
-        cmds.connectAttr(f"{self.parent_jnt}.worldMatrix[0]",
-                         f"{dist}.inMatrix1")
+        cmds.connectAttr(f"{anchor}.worldMatrix[0]", f"{dist}.inMatrix1")
         cmds.connectAttr(f"{self.ik_ctrl}.worldMatrix[0]",
                          f"{dist}.inMatrix2")
 
@@ -1693,10 +1747,14 @@ class LegRig(object):
 
     def __init__(self, side="L", positions=None, bendy_count=5,
                  parent_ctrl=None, parent_jnt=None,
-                 ctrl_grp=None, jnt_grp=None, misc_grp=None):
+                 ctrl_grp=None, jnt_grp=None, misc_grp=None, label=None):
         assert side in ("L", "R")
+        # `label` (optional): builds a SECOND instance with unique names, e.g.
+        # label="lowerArm" -> L_lowerArm_*. Unset = the classic names, so
+        # existing rigs, poses, pickers and space switches are untouched.
         self.side = side
-        self.prefix = f"{side}_leg"
+        self.label = label
+        self.prefix = f"{side}_{label}" if label else f"{side}_leg"
         self.bendy_count = bendy_count
         mult = 1 if side == "L" else -1
         self.positions = positions or {
@@ -1844,6 +1902,11 @@ class LegRig(object):
             lock_hide_attrs(ctrl, ["tx", "ty", "tz",
                                    "sx", "sy", "sz", "v"])
             self.fk_ctrls.append(ctrl)
+        # Thigh/shin length: the two segments stretchy IK lengthens.
+        for i, part in ((1, "hip"), (2, "knee")):
+            offset = cmds.listRelatives(self.fk_ctrls[i], p=True)[0]
+            add_fk_length(self.fk_ctrls[i - 1], offset,
+                          f"{self.prefix}_{part}_fkLength_MD")
 
     def _create_ik(self):
         # Three IK handles
@@ -2128,25 +2191,27 @@ class LegRig(object):
         knee_t = cmds.getAttr(f"{self.ik_jnts[1]}.translateX")
         ankle_t = cmds.getAttr(f"{self.ik_jnts[2]}.translateX")
 
-        # Rest length = ACTUAL world distance from parent_jnt (pelvis) to the
-        # ankle locator at build time. The naive sum-of-bones approach breaks
-        # when pelvis is offset from the leg hip (very common — pelvis on
-        # spine centerline, leg hip out at the side), forcing ratio > 1 at
-        # rest and over-stretching the BIND chain.
+        # Measure from an anchor on the hip, not from parent_jnt (pelvis):
+        # the pelvis sits on the spine centreline, so pelvis -> ankle grows
+        # by a different ratio than hip -> ankle and the IK ankle missed its
+        # locator (see make_stretch_anchor). Not ik_jnts[0] either: the IK
+        # solver writes its rotate, which would feed back into this
+        # distance, into the stretch, and into ik_jnts[1..2].translateX,
+        # re-triggering the solver.
         ankle_loc = self.foot_locators["ankle"]
-        parent_pos = cmds.xform(self.parent_jnt, q=True, ws=True, t=True)
-        ankle_pos  = cmds.xform(ankle_loc,       q=True, ws=True, t=True)
+        anchor = make_stretch_anchor(self.ik_jnts[0], self.parent_jnt,
+                                     f"{self.prefix}_stretch_ANCHOR")
+
+        # Rest length = ACTUAL world distance from the hip anchor to the
+        # ankle locator at build time, so ratio is exactly 1.0 at rest.
+        anchor_pos = cmds.xform(anchor,    q=True, ws=True, t=True)
+        ankle_pos  = cmds.xform(ankle_loc, q=True, ws=True, t=True)
         rest_length = math.sqrt(sum((p - a) ** 2
-                                    for p, a in zip(parent_pos, ankle_pos)))
+                                    for p, a in zip(anchor_pos, ankle_pos)))
 
         dist = cmds.createNode("distanceBetween",
                                n=f"{self.prefix}_stretch_DIST")
-        # Use parent_jnt (pelvis) instead of ik_jnts[0] to avoid an
-        # evaluation cycle: the IK solver writes to ik_jnts[0].rotate which
-        # would feed back into this distance, into the stretch, and into
-        # ik_jnts[1..2].translateX, re-triggering the solver.
-        cmds.connectAttr(f"{self.parent_jnt}.worldMatrix[0]",
-                         f"{dist}.inMatrix1")
+        cmds.connectAttr(f"{anchor}.worldMatrix[0]", f"{dist}.inMatrix1")
         cmds.connectAttr(f"{ankle_loc}.worldMatrix[0]",
                          f"{dist}.inMatrix2")
 
@@ -2306,7 +2371,29 @@ class TailRig(object):
 
     def __init__(self, positions=None, joint_count=7,
                  parent_ctrl=None, parent_jnt=None,
-                 ctrl_grp=None, jnt_grp=None, misc_grp=None):
+                 ctrl_grp=None, jnt_grp=None, misc_grp=None, label=None,
+                 side="C", controls="fkik", ik_follow=False):
+        # `label` (optional): builds a SECOND instance with unique names, e.g.
+        # label="tail2" -> C_tail2_*. Unset = the classic names, so
+        # existing rigs, poses, pickers and space switches are untouched.
+        # Only NODE NAMES take the label. Position keys stay tail_01..NN
+        # because they come straight from the guide system.
+        self.name = label or "tail"
+        # `side` + `controls` turn the tail into a generic custom chain
+        # (capes, antennae, tentacles): side "L"/"R" names it L_/R_,
+        # controls "fk" / "ik" lock the IK/FK switch to that one mode and
+        # hide the other set of ctrls. Defaults = the classic C_ tail.
+        if side not in ("C", "L", "R"):
+            raise ValueError("TailRig side must be C, L or R, got %r" % side)
+        if controls not in ("fkik", "fk", "ik"):
+            raise ValueError("TailRig controls must be fkik, fk or ik, got %r"
+                             % controls)
+        self.side = side
+        self.controls = controls
+        # ik_follow: IK spline ctrls ride along with parent_ctrl (a chain on
+        # the head turns with the head). False = the classic tail, whose IK
+        # ctrls live in world space under ctrl_grp.
+        self.ik_follow = ik_follow
         self.joint_count = joint_count
         # Default positions: arc backward and downward from pelvis area.
         if positions is None:
@@ -2347,6 +2434,7 @@ class TailRig(object):
         self._create_ikfk_blend()
         self._create_visibility_sdk()
         self._create_curl_wag_sdk()
+        self._apply_control_mode()
         # Hide the FK + IK driver chains; BIND chain stays visible.
         cmds.setAttr(f"{self.fk_jnts[0]}.v", 0)
         cmds.setAttr(f"{self.ik_jnts[0]}.v", 0)
@@ -2363,9 +2451,9 @@ class TailRig(object):
         # ---- BIND chain ----
         cmds.select(cl=True)
         for slot in slots:
-            j = cmds.joint(n=f"C_{slot}_BIND_JNT", p=self.positions[slot])
+            j = cmds.joint(n=f"{self.side}_{self._nm(slot)}_BIND_JNT", p=self.positions[slot])
             self.bind_jnts.append(j)
-        tip_jnt = cmds.joint(n="C_tailTip_BIND_JNT",
+        tip_jnt = cmds.joint(n=f"{self.side}_{self.name}Tip_BIND_JNT",
                               p=self.positions["tip"])
         self.bind_jnts.append(tip_jnt)
         # Auto-orient: X aims down the chain (tail forward direction),
@@ -2380,6 +2468,11 @@ class TailRig(object):
         # ---- FK + IK driver chains ----
         self.fk_jnts = self._duplicate_chain(self.bind_jnts, "FK")
         self.ik_jnts = self._duplicate_chain(self.bind_jnts, "IK")
+
+    def _nm(self, slot):
+        """Position key -> node-name token: tail_03 -> tail_03 (classic) or
+        tail2_03 when labelled."""
+        return self.name + slot[len("tail"):]
 
     def _duplicate_chain(self, source, suffix):
         new_chain = []
@@ -2401,10 +2494,12 @@ class TailRig(object):
         prev_ctrl = self.parent_ctrl
         for i, slot in enumerate(slots):
             fk_jnt = self.fk_jnts[i]
-            ctrl_name = f"C_{slot}_FK_CTRL"
+            ctrl_name = f"{self.side}_{self._nm(slot)}_FK_CTRL"
             ctrl = create_circle_ctrl(
                 ctrl_name, radius=0.7 * SCALE,
-                normal=(1, 0, 0), color=COLOR_CENTER,
+                normal=(1, 0, 0), color={"L": COLOR_LEFT,
+                                         "R": COLOR_RIGHT}.get(self.side,
+                                                               COLOR_CENTER),
             )
             cmds.matchTransform(ctrl, fk_jnt)
             offset = make_offset_group(ctrl)
@@ -2429,7 +2524,7 @@ class TailRig(object):
         slots = self._ordered_slots()
         pts = [self.positions[s] for s in slots] + [self.positions["tip"]]
 
-        self.curve = cmds.curve(ep=pts, d=3, n="C_tail_CRV")
+        self.curve = cmds.curve(ep=pts, d=3, n=f"{self.side}_{self.name}_CRV")
         cmds.parent(self.curve, self.misc_grp)
         # Same anti-double-translate trick as the ribbons: the curve's
         # parent inherits cog/global scale, but the cluster handles
@@ -2444,7 +2539,7 @@ class TailRig(object):
             sj=self.ik_jnts[0], ee=self.ik_jnts[-1],
             sol="ikSplineSolver", curve=self.curve,
             createCurve=False, parentCurve=False,
-            n="C_tail_ikHandle",
+            n=f"{self.side}_{self.name}_ikHandle",
         )[0]
         cmds.setAttr(f"{self.ik_handle}.v", 0)
         cmds.parent(self.ik_handle, self.misc_grp)
@@ -2472,17 +2567,18 @@ class TailRig(object):
                 continue
             cv_specs = [f"{self.curve}.cv[{i}]" for i in cv_indices]
             cluster, handle = cmds.cluster(
-                cv_specs, n=f"C_tail_{label}_CLUS")
+                cv_specs, n=f"{self.side}_{self.name}_{label}_CLUS")
             cmds.hide(handle)
             cmds.parent(handle, self.misc_grp)
 
             ctrl = create_diamond_ctrl(
-                f"C_tail_{label}_IK_CTRL",
+                f"{self.side}_{self.name}_{label}_IK_CTRL",
                 size=0.8 * SCALE, color=COLOR_IK,
             )
             cmds.xform(ctrl, ws=True, t=cluster_positions[label])
             offset = make_offset_group(ctrl)
-            cmds.parent(offset, self.ctrl_grp)
+            cmds.parent(offset, self.parent_ctrl if self.ik_follow
+                        else self.ctrl_grp)
             # Drive the cluster handle from the ctrl
             cmds.parentConstraint(ctrl, handle, mo=True)
             lock_hide_attrs(ctrl, ["sx", "sy", "sz", "v"])
@@ -2490,7 +2586,7 @@ class TailRig(object):
 
     def _create_settings_ctrl(self):
         self.settings_ctrl = create_gear_ctrl(
-            "C_tail_SETTINGS_CTRL", size=0.5 * SCALE,
+            f"{self.side}_{self.name}_SETTINGS_CTRL", size=0.5 * SCALE,
             color=COLOR_SETTINGS,
         )
         cmds.matchTransform(self.settings_ctrl, self.bind_jnts[0])
@@ -2514,7 +2610,7 @@ class TailRig(object):
     def _create_ikfk_blend(self):
         """Blend BIND chain rotations between FK and IK chains. Same
         orientConstraint pattern as arms / legs."""
-        rev = cmds.createNode("reverse", n="C_tail_ikfk_REV")
+        rev = cmds.createNode("reverse", n=f"{self.side}_{self.name}_ikfk_REV")
         cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch",
                           f"{rev}.inputX")
 
@@ -2551,6 +2647,21 @@ class TailRig(object):
             cmds.setDrivenKeyframe(f"{ctrl}.v", cd=driver, dv=1.0, v=1,
                                     itt="linear", ott="step")
 
+    def _apply_control_mode(self):
+        """controls="fk" / "ik": pin the switch to that mode and lock it, so
+        only one set of ctrls ever shows. The visibility SDK already hides
+        the other set. Curl / wag only drive the FK chain, so an IK-only
+        chain hides them too."""
+        if self.controls == "fkik":
+            return
+        plug = f"{self.settings_ctrl}.ikFkSwitch"
+        cmds.setAttr(plug, 1 if self.controls == "fk" else 0)
+        cmds.setAttr(plug, lock=True, keyable=False, channelBox=False)
+        if self.controls == "ik":
+            for attr in ("curl", "wag"):
+                cmds.setAttr(f"{self.settings_ctrl}.{attr}",
+                             lock=True, keyable=False, channelBox=False)
+
     def _create_curl_wag_sdk(self):
         """Linear progression: each joint gets curl × (i+1)/N degrees on
         AUTO.rotateZ, and wag × (i+1)/N on AUTO.rotateY. Total curl at
@@ -2566,14 +2677,14 @@ class TailRig(object):
             weight = 0.3 + 0.7 * (i / float(n - 1) if n > 1 else 0)
             # curl → rotateZ
             mc = cmds.createNode("multDoubleLinear",
-                                  n=f"C_tail_{i + 1:02d}_curl_MUL")
+                                  n=f"{self.side}_{self.name}_{i + 1:02d}_curl_MUL")
             cmds.connectAttr(f"{self.settings_ctrl}.curl",
                               f"{mc}.input1")
             cmds.setAttr(f"{mc}.input2", weight)
             cmds.connectAttr(f"{mc}.output", f"{auto}.rotateZ")
             # wag → rotateY
             mw = cmds.createNode("multDoubleLinear",
-                                  n=f"C_tail_{i + 1:02d}_wag_MUL")
+                                  n=f"{self.side}_{self.name}_{i + 1:02d}_wag_MUL")
             cmds.connectAttr(f"{self.settings_ctrl}.wag",
                               f"{mw}.input1")
             cmds.setAttr(f"{mw}.input2", weight)
@@ -3901,7 +4012,8 @@ class CharacterRig(object):
                  face_submodules=None, face_heavy=False,
                  spine_fk_count=3,
                  face_lid_joints_per_arc=16,
-                 face_lip_joints_per_curve=16):
+                 face_lip_joints_per_curve=16,
+                 extra_limbs=None):
         positions = positions or {}
         self.core_positions       = positions.get("core")
         self.spine_positions      = positions.get("spine")
@@ -3924,6 +4036,11 @@ class CharacterRig(object):
         self.spine_fk_count = spine_fk_count    # FK ctrls between hip+chest
         self.face_lid_joints_per_arc = face_lid_joints_per_arc
         self.face_lip_joints_per_curve = face_lip_joints_per_curve
+        # Fantasy-creature limbs built on top of the biped (four arms, extra
+        # legs, a second tail...). See _build_extra_limbs for the spec format.
+        # Empty = a normal biped, byte-identical to before.
+        self.extra_limbs = list(extra_limbs or [])
+        self.extra_rigs = {}
 
         # Module dependencies:
         # - Spine is OPTIONAL. When absent, upper-body modules (neck/clavicles/
@@ -3975,6 +4092,9 @@ class CharacterRig(object):
         if cmds.objExists("CHARACTER_RIG_GRP"):
             cmds.error("Character rig already exists. Delete it first.")
             return
+        # Check extra-limb specs BEFORE creating anything, so a typo can't
+        # leave a half-built rig in the scene.
+        self._validate_extra_limbs()
         # Auto-size controls to the (possibly scaled) guides. SCALE is a module
         # global every sub-module reads, so set it for this build and restore
         # it after — a default-size rig is unaffected (factor 1.0).
@@ -4107,6 +4227,18 @@ class CharacterRig(object):
             )
             self.face.build()
 
+        # 7.5 Extra limbs + custom chains. No-op unless extra_limbs given.
+        # After the face, so a limb can attach to ANY joint (jaw, brow...).
+        if self.extra_limbs:
+            neck = getattr(self, "neck", None)
+            self._build_extra_limbs(cg, jg, mg, parents={
+                "chest":  (torso_ctrl, torso_jnt),
+                "pelvis": (pelvis_ctrl, pelvis_jnt),
+                "cog":    (self.core.cog_ctrl, self.core.root_bind_jnt),
+                "head":   ((neck.fk_ctrls[1], neck.bind_jnts[1]) if neck
+                           else (torso_ctrl, torso_jnt)),
+            })
+
         # Procedural auto-walk on the root ctrl (needs both legs).
         if self.L_leg and self.R_leg:
             self._build_auto_walk()
@@ -4146,6 +4278,380 @@ class CharacterRig(object):
 
         cmds.select(cl=True)
         print("[CharacterRig] Done. Top node: CHARACTER_RIG_GRP")
+
+    # ------------------------------------------------------------------
+    # Extra limbs (fantasy creatures)
+    # ------------------------------------------------------------------
+    _EXTRA_DEFAULT_PARENT = {"arm": "chest", "leg": "pelvis", "tail": "pelvis",
+                             "chain": "chest"}
+    _CHAIN_CONTROLS = ("fkik", "fk", "ik")
+    # Name tokens the classic biped + face already use (compared lowercase).
+    # An extra limb reusing one would collide with, or be picked up by name
+    # as, a base rig node. Labels starting "lid"/"lip" are blocked too, since
+    # the face export pass grabs *_lid* / *_lip* joints.
+    _RESERVED_LABELS = {
+        "arm", "leg", "tail", "clavicle", "thumb", "index", "middle", "ring",
+        "pinky", "spine", "neck", "head", "chest", "pelvis", "hip", "hips",
+        "cog", "root", "global", "autowalk", "jaw", "eye", "eyes", "eyeball",
+        "brow", "browinner", "browmid", "browouter", "cheek", "ear", "nose",
+        "nostril", "tongue", "teeth", "upperteeth", "lowerteeth", "mouth",
+        "mouthcorner", "upperlip", "lowerlip", "upperlipmid", "lowerlipmid",
+        "eyelid", "face", "foot", "hand", "space", "spaceswitch"}
+
+    _EXTRA_PARENTS = ("chest", "pelvis", "cog", "head")
+
+    @staticmethod
+    def _attach_joint_name(par):
+        """The joint name (or wildcard pattern) a custom attach targets, or
+        None if `par` isn't a joint-style parent. Accepted forms:
+            "C_tail_02_BIND_JNT"
+            {"joint": "C_spine_*_BIND_JNT", "near": (x, y, z)}
+        (the second picks the matching joint nearest `near`, for guides that
+        sit between ribbon joints)."""
+        if isinstance(par, str) and par.endswith("_JNT"):
+            return par
+        if (isinstance(par, dict) and isinstance(par.get("joint"), str)
+                and par["joint"].endswith("_JNT")):
+            return par["joint"]
+        return None
+
+    def _resolve_attach(self, par, side, label, cg):
+        """(ctrl_parent, joint_parent) for a joint-style attach on `side`.
+        An L_ joint on a mirrored R limb becomes its R_ twin. The ctrls hang
+        under a small group in the controls hierarchy that follows the
+        joint, so they stay visible and move with whatever drives it."""
+        name = self._attach_joint_name(par)
+        near = par.get("near") if isinstance(par, dict) else None
+        if side == "R" and name.startswith("L_"):
+            name = "R_" + name[2:]
+            if near:
+                near = (-near[0], near[1], near[2])
+        found = [j for j in (cmds.ls(name, type="joint") or [])
+                 if "|" not in j]
+        if not found:
+            raise ValueError("extra limb %r: attach joint %r isn't in the rig. "
+                             "Is its module (tail, face, fingers...) turned "
+                             "on?" % (label, name))
+        if len(found) > 1 or "*" in name:
+            ref = near or cmds.xform(found[0], q=True, ws=True, t=True)
+            found.sort(key=lambda j: sum(
+                (a - b) ** 2 for a, b in
+                zip(cmds.xform(j, q=True, ws=True, t=True), ref)))
+        jnt = found[0]
+        grp = cmds.group(em=True, n="%s_%s_attach_GRP" % (side, label))
+        cmds.matchTransform(grp, jnt)
+        cmds.parent(grp, cg)
+        cmds.parentConstraint(jnt, grp, mo=True)
+        return grp, jnt
+
+    def _validate_extra_limbs(self):
+        """Raise ValueError for any bad extra-limb spec. Runs before the
+        build creates a single node."""
+        import re
+        seen = set()
+        for i, spec in enumerate(self.extra_limbs):
+            if not isinstance(spec, dict):
+                raise ValueError("extra_limbs[%d] must be a dict, got %r"
+                                 % (i, spec))
+            kind = spec.get("type")
+            label = spec.get("label")
+            if kind not in self._EXTRA_DEFAULT_PARENT:
+                raise ValueError('extra limb type must be "arm", "leg", '
+                                 '"tail" or "chain", got %r' % (kind,))
+            if not label or not re.match(r"^[A-Za-z][A-Za-z0-9]*$",
+                                         str(label)):
+                raise ValueError("extra limb label must be letters/digits "
+                                 "starting with a letter, got %r" % (label,))
+            low = str(label).lower()
+            if (low in self._RESERVED_LABELS or low.startswith("eyelid")
+                    or low.startswith(("lid", "lip"))):
+                raise ValueError("extra limb label %r clashes with a name the "
+                                 "base rig or face already uses, pick another "
+                                 "(e.g. %r)" % (label, "extra" + label[:1]
+                                                .upper() + label[1:]))
+            if low in seen:
+                raise ValueError("extra limb label %r is used twice, labels "
+                                 "must be unique" % label)
+            par = spec.get("parent", self._EXTRA_DEFAULT_PARENT[kind])
+            is_pair = (isinstance(par, (list, tuple)) and len(par) == 2
+                       and all(isinstance(n, str) for n in par))
+            jnt = self._attach_joint_name(par)
+            if not is_pair and jnt is None and par not in self._EXTRA_PARENTS:
+                raise ValueError("extra limb %r: unknown parent %r (use %s, a "
+                                 "joint name like 'C_spine_04_BIND_JNT', or a "
+                                 "(ctrl, joint) pair)"
+                                 % (label, par, ", ".join(self._EXTRA_PARENTS)))
+            if is_pair:
+                for node in par:
+                    if not cmds.objExists(node):
+                        raise ValueError("extra limb %r: parent node %r does "
+                                         "not exist" % (label, node))
+            if jnt is not None:
+                # A joint on an extra limb must come from one listed EARLIER
+                # (limbs build in order). Base-rig joints are checked once
+                # the base rig exists, before any extra limb is built.
+                m = re.match(r"^[LRC]_([A-Za-z][A-Za-z0-9]*)", jnt)
+                tok = (m.group(1).lower() if m else "")
+                later = {str(s.get("label", "")).lower()
+                         for s in self.extra_limbs[i + 1:]
+                         if isinstance(s, dict)}
+                if tok == low or tok in later:
+                    raise ValueError("extra limb %r: can't attach to %r, that "
+                                     "limb is %s. Attach to a limb listed "
+                                     "before it." % (label, jnt, "itself"
+                                                     if tok == low else
+                                                     "built after it"))
+            seen.add(low)
+            sides_ok = (("C", "L", "R", "LR") if kind == "chain"
+                        else ("L", "R", "LR"))
+            if kind != "tail" and spec.get("side", "LR") not in sides_ok:
+                raise ValueError('extra limb %r: side must be %s, got %r'
+                                 % (label, " / ".join(sides_ok),
+                                    spec.get("side")))
+            if kind == "chain":
+                controls = spec.get("controls", "fkik")
+                if controls not in self._CHAIN_CONTROLS:
+                    raise ValueError('chain %r: controls must be "fkik", "fk" '
+                                     'or "ik", got %r' % (label, controls))
+                n = spec.get("joints")
+                pos = spec.get("positions")
+                if pos is not None:
+                    n = len([k for k in pos if str(k).startswith("tail_")])
+                if not isinstance(n, int) or n < 1:
+                    raise ValueError("chain %r: needs a joint count of 1 or "
+                                     "more (\"joints\"), got %r" % (label, n))
+                if controls != "fk" and n < 2:
+                    raise ValueError("chain %r: IK needs at least 2 joints, "
+                                     "use controls \"fk\" for a single joint"
+                                     % label)
+            off = spec.get("offset")
+            if off is not None and not (
+                    isinstance(off, (list, tuple)) and len(off) == 3
+                    and all(isinstance(c, (int, float)) for c in off)):
+                raise ValueError("extra limb %r: offset must be (x, y, z), got "
+                                 "%r" % (label, off))
+
+    def _build_extra_limbs(self, cg, jg, mg, parents):
+        """Build each `extra_limbs` spec on top of the base biped.
+
+        A spec is a dict:
+          type       "arm" | "leg" | "tail" | "chain"                required
+          label      unique name token, letters/digits, e.g. "lowerArm"
+                     -> nodes L_lowerArm_* / R_lowerArm_*            required
+          side       "LR" mirrored pair (default) | "L" | "R"
+                     (chains also "C" for one centre chain)
+          parent     "chest" | "pelvis" | "cog" | "head", a (ctrl, joint)
+                     pair, or ANY joint: "C_tail_02_BIND_JNT", or
+                     {"joint": "C_spine_*_BIND_JNT", "near": (x, y, z)}.
+                     An L_ joint on a mirrored limb's R side becomes R_.
+                     Default: chest for arms and chains, pelvis otherwise.
+          joints     chains: number of joints (plus a tip)
+          controls   chains: "fkik" (switchable, default) | "fk" | "ik"
+          positions  that limb's positions. With side "LR" they are for the
+                     LEFT and the right is mirrored in X. Omitted = copy this
+                     rig's own arm / leg / tail layout.
+          offset     (x, y, z) added to those positions (x mirrored on R)
+          fingers    True: give an extra arm fingers                  arms
+          clavicle   True: give an extra arm its own clavicle/shrug   arms
+          clavicle_positions / finger_positions   optional, LEFT side like
+                     `positions`. Omitted = the base clavicle / fingers moved
+                     along with this arm's shoulder / wrist.
+
+        Four-armed creature, second pair 25 units lower:
+            CharacterRig(positions=pos, extra_limbs=[
+                {"type": "arm", "label": "lowerArm", "offset": (0, -25, 0),
+                 "clavicle": True, "fingers": True}])
+        """
+        import copy
+
+        def _is_pt(v):
+            return (isinstance(v, (list, tuple)) and len(v) == 3
+                    and all(isinstance(c, (int, float)) for c in v))
+
+        def _map(d, fn):
+            if d is None:
+                return None
+            out = {}
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    out[k] = _map(v, fn)
+                elif _is_pt(v):
+                    out[k] = fn(v)
+                else:
+                    out[k] = copy.deepcopy(v)
+            return out
+
+        def _shift(d, o):
+            return _map(d, lambda v: (v[0] + o[0], v[1] + o[1], v[2] + o[2]))
+
+        def _mirror(d):
+            return _map(d, lambda v: (-v[0], v[1], v[2]))
+
+        # Base-rig attach joints must exist before ANY extra limb is built
+        # (joints on earlier extra limbs are made along the way).
+        extra_tokens = {str(s["label"]).lower() for s in self.extra_limbs}
+        for spec in self.extra_limbs:
+            name = self._attach_joint_name(spec.get("parent"))
+            if not name:
+                continue
+            m = re.match(r"^[LRC]_([A-Za-z][A-Za-z0-9]*)", name)
+            if m and m.group(1).lower() in extra_tokens:
+                continue
+            if not cmds.ls(name, type="joint"):
+                raise ValueError("extra limb %r: attach joint %r isn't in the "
+                                 "rig. Is its module (tail, face, fingers...) "
+                                 "turned on?" % (spec["label"], name))
+
+        for spec in self.extra_limbs:            # validated in build()
+            kind = spec["type"]
+            label = spec["label"]
+            par = spec.get("parent", self._EXTRA_DEFAULT_PARENT[kind])
+            custom = self._attach_joint_name(par) is not None
+
+            def attach(sd):
+                if custom:
+                    return self._resolve_attach(par, sd, label, cg)
+                if isinstance(par, (list, tuple)):
+                    return tuple(par)
+                return parents[par]
+
+            p_ctrl, p_jnt = (None, None) if custom else attach("C")
+            off = spec.get("offset")
+            explicit = spec.get("positions")
+            built = {"type": kind}
+
+            if kind == "chain":
+                controls = spec.get("controls", "fkik")
+                sides = spec.get("side", "LR")
+                for sd in (("L", "R") if sides == "LR" else (sides,)):
+                    if explicit is not None:
+                        pos = copy.deepcopy(explicit)
+                        if sides == "LR" and sd == "R":
+                            pos = _mirror(pos)
+                        count = len([k for k in pos
+                                     if str(k).startswith("tail_")])
+                    else:
+                        count = spec["joints"]
+                        pos = TailRig(joint_count=count).positions
+                        if sd == "R":
+                            pos = _mirror(pos)
+                    if off:
+                        o = off if sd != "R" else (-off[0], off[1], off[2])
+                        pos = _shift(pos, o)
+                    c_ctrl, c_jnt = attach(sd)
+                    rig = TailRig(positions=pos, joint_count=count,
+                                  parent_ctrl=c_ctrl, parent_jnt=c_jnt,
+                                  ctrl_grp=cg, jnt_grp=jg, misc_grp=mg,
+                                  label=label, side=sd, controls=controls,
+                                  ik_follow=True)
+                    rig.build()
+                    built[sd] = rig
+                self.extra_rigs[label] = built
+                print("[CharacterRig] chain %r built (%s, %s controls)"
+                      % (label, "+".join(k for k in built if k != "type"),
+                         controls))
+                continue
+
+            if kind == "tail":
+                if custom:
+                    p_ctrl, p_jnt = attach("C")
+                pos = copy.deepcopy(explicit if explicit is not None else
+                                    (self.tail_positions or TailRig().positions))
+                if off:
+                    pos = _shift(pos, off)
+                count = len([k for k in pos if str(k).startswith("tail_")])
+                rig = TailRig(positions=pos, joint_count=count,
+                              parent_ctrl=p_ctrl, parent_jnt=p_jnt,
+                              ctrl_grp=cg, jnt_grp=jg, misc_grp=mg,
+                              label=label)
+                rig.build()
+                built["C"] = rig
+                self.extra_rigs[label] = built
+                print("[CharacterRig] extra tail %r built" % label)
+                continue
+
+            sides = spec.get("side", "LR")
+            for sd in (("L", "R") if sides == "LR" else (sides,)):
+                if custom:
+                    p_ctrl, p_jnt = attach(sd)
+                o = None
+                if off:
+                    o = off if sd == "L" else (-off[0], off[1], off[2])
+
+                if explicit is not None:
+                    pos = copy.deepcopy(explicit)
+                    if sides == "LR" and sd == "R":
+                        pos = _mirror(pos)
+                else:
+                    base = getattr(self, "%s_%s_positions" % (sd, kind))
+                    mod = ArmRig if kind == "arm" else LegRig
+                    pos = (copy.deepcopy(base) if base
+                           else mod(side=sd).positions)
+                if o:
+                    pos = _shift(pos, o)
+
+                if kind == "leg":
+                    rig = LegRig(side=sd, positions=pos,
+                                 parent_ctrl=p_ctrl, parent_jnt=p_jnt,
+                                 ctrl_grp=cg, jnt_grp=jg, misc_grp=mg,
+                                 label=label)
+                    rig.build()
+                    built[sd] = rig
+                    continue
+
+                # Clavicle + fingers ride along with wherever THIS arm's
+                # shoulder / wrist ended up (offset or moved guides), unless
+                # the spec gives their positions outright.
+                abase = (getattr(self, "%s_arm_positions" % sd)
+                         or ArmRig(side=sd).positions)
+
+                def _delta(key):
+                    return tuple(a - b for a, b in zip(pos[key], abase[key]))
+
+                def _given(key):
+                    d = spec.get(key)
+                    if d is None:
+                        return None
+                    d = copy.deepcopy(d)
+                    return _mirror(d) if sides == "LR" and sd == "R" else d
+
+                arm_ctrl, arm_jnt = p_ctrl, p_jnt
+                if spec.get("clavicle"):
+                    cpos = _given("clavicle_positions")
+                    if cpos is None:
+                        cbase = getattr(self, "%s_clavicle_positions" % sd)
+                        cpos = _shift(copy.deepcopy(cbase) if cbase
+                                      else ClavicleRig(side=sd).positions,
+                                      _delta("shoulder"))
+                    cpos["clavicle_tip"] = tuple(pos["shoulder"])
+                    clav = ClavicleRig(side=sd, positions=cpos,
+                                       parent_ctrl=p_ctrl, parent_jnt=p_jnt,
+                                       ctrl_grp=cg, jnt_grp=jg, label=label)
+                    clav.build()
+                    built["%s_clavicle" % sd] = clav
+                    arm_ctrl, arm_jnt = clav.ctrl, clav.tip_jnt
+
+                fpos = None
+                if spec.get("fingers"):
+                    fbase = getattr(self, "%s_finger_positions" % sd)
+                    fpos = _given("finger_positions")
+                    if fpos is None and fbase:
+                        fpos = _shift(copy.deepcopy(fbase), _delta("wrist"))
+                    if fpos is None:
+                        cmds.warning("extra arm %r: this rig has no finger "
+                                     "guide positions, so it is built "
+                                     "without fingers" % label)
+
+                rig = ArmRig(side=sd, positions=pos,
+                             parent_ctrl=arm_ctrl, parent_jnt=arm_jnt,
+                             ctrl_grp=cg, jnt_grp=jg, misc_grp=mg,
+                             finger_positions=fpos, label=label)
+                rig.build()
+                built[sd] = rig
+
+            self.extra_rigs[label] = built
+            print("[CharacterRig] extra %s %r built (%s)"
+                  % (kind, label, "+".join(k for k in built if k != "type")))
 
     def delete(self):
         if cmds.objExists("CHARACTER_RIG_GRP"):
@@ -4307,6 +4813,18 @@ class CharacterRig(object):
         wire_foot(self.L_leg, "walkNrmZL", "walkNrmYL")
         wire_foot(self.R_leg, "walkNrmZR", "walkNrmYR")
 
+        # Extra leg pairs (centaur, spider...) alternate: the 1st extra pair
+        # steps opposite the base legs (diagonal trot), the 2nd matches them,
+        # and so on, so the feet never all lift together.
+        extra_legs = [r for r in self.extra_rigs.values()
+                      if r.get("type") == "leg"]
+        for i, rigs in enumerate(extra_legs, 1):
+            swap = i % 2 == 1
+            for sd, leg in ((s, rigs[s]) for s in ("L", "R") if s in rigs):
+                left = (sd == "L") != swap
+                wire_foot(leg, "walkNrmZL" if left else "walkNrmZR",
+                          "walkNrmYL" if left else "walkNrmYR")
+
         # Body bob on the COG (feet stay grounded — they're not under it).
         cog_auto = insert_auto(cog)
         cmds.connectAttr(
@@ -4332,8 +4850,14 @@ class CharacterRig(object):
             self._sdk_walk(f"{g}.walkNrmArmL", phase_r, arm_keys, "spline")
             self._sdk_walk(f"{g}.walkNrmArmR", phase,   arm_keys, "spline")
             arm_amt = amount("C_autoWalk_armAmt_MDL", "walkArmSwing")
-            for arm, nrm in ((self.L_arm, "walkNrmArmL"),
-                             (self.R_arm, "walkNrmArmR")):
+            arm_pairs = [(self.L_arm, "walkNrmArmL"),
+                         (self.R_arm, "walkNrmArmR")]
+            # Extra arms swing with the base arm on their side.
+            for rigs in self.extra_rigs.values():
+                if rigs.get("type") == "arm":
+                    arm_pairs += [(rigs[s], "walkNrmArm" + s)
+                                  for s in ("L", "R") if s in rigs]
+            for arm, nrm in arm_pairs:
                 auto = insert_world_auto(arm.ik_ctrl)
                 cmds.connectAttr(
                     mul(f"{arm.prefix}_walkArm_MDL",

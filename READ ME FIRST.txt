@@ -1,6 +1,6 @@
 ===============================================================
- DANYAL'S RIG BUILDER  v1.0.1
- Free auto-rigging toolset for Autodesk Maya (2022-2026)
+ DANYAL'S RIG BUILDER  v1.0.2
+ Free auto-rigging toolset for Autodesk Maya (2022 to 2026)
 ===============================================================
 
  INSTALL  (30 seconds)
@@ -26,6 +26,8 @@
  ----------------
  QUICKSTART.md  - zero to a finished, export-ready rig.
                   Start here.
+ CREATURES.md   - extra arms, legs, wings and tails: four-armed
+                  characters, centaurs, insects and more.
  PIPELINE.md    - for animators / tech animators / teams:
                   naming, hierarchy, handoff, referencing,
                   and the do's and don'ts.

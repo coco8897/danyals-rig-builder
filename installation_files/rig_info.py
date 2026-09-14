@@ -104,6 +104,27 @@ INFO_REGISTRY = {
         "Order: core → spine → neck → clavicles → arms (+fingers) → "
         "legs → tail → face. Auto-walk is wired onto the global ctrl."
     ),
+    "creature_limbs": (
+        "Creature Limbs",
+        "Adds extra arms, legs, tails or your own custom chains on top of "
+        "the biped: four arms, a dragon, a centaur, insect legs, capes, "
+        "tentacles, antennae.\n\n"
+        "1. Pick a preset and click Add Preset, or set Type / Name / Attach "
+        "/ Side and click Add Limb Guides.\n"
+        "   Attach > Custom: select ANY guide or joint (spine 2, tail 3, "
+        "another limb's knee) and click Pick Selected.\n"
+        "   Type > Chain: pick the joint count and FK, IK or FK + IK "
+        "controls. Drew your own joints? Select the root and click From "
+        "Selected Joints.\n"
+        "2. Move the new guides (under CREATURE_GUIDES_GRP) to fit your "
+        "model. With 'Both (mirrored)' you only place the left side. Guide "
+        "mode EZ links them so parents carry their children.\n"
+        "3. Build Rig.\n\n"
+        "Every extra limb gets its own names (L_lowerArm_IK_CTRL ...), "
+        "controls, auto-walk, space switching, pose mirroring and a Creature "
+        "tab in the picker. Remove Limb deletes its guides; rebuild to drop "
+        "it from the rig. Full guide: CREATURES.md."
+    ),
     "delete_rig": (
         "Delete Rig",
         "Removes CHARACTER_RIG_GRP and every node beneath it. The "

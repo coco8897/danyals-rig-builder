@@ -232,6 +232,11 @@ def flip_pose_lr():
             # swap: c <- mirror(opp), opp <- mirror(c)
             _apply_world_mirror(c, snap[opp])
             _apply_world_mirror(opp, snap[c])
+            la = rpt.LENGTH_ATTR                  # FK bone length, if any
+            if rpt._settable(c, la) and rpt._settable(opp, la):
+                lc, lo = cmds.getAttr(f"{c}.{la}"), cmds.getAttr(f"{opp}.{la}")
+                cmds.setAttr(f"{c}.{la}", lo)
+                cmds.setAttr(f"{opp}.{la}", lc)
             done.update((c, opp))
             n += 2
         elif opp is None:

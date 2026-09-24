@@ -500,6 +500,62 @@ GUIDE_NOTES = {
 # GUIDE SYSTEM
 # =============================================================================
 
+def mesh_box(meshes):
+    """World box (min xyz, max xyz) around some meshes, ignoring the hidden
+    original shapes of skinned ones. None if there's nothing to measure."""
+    shapes = []
+    for m in meshes:
+        if cmds.objectType(m) == "mesh":
+            shapes.append(m)
+            continue
+        shapes += cmds.listRelatives(m, s=True, ni=True, type="mesh",
+                                     f=True) or []
+    if not shapes:
+        return None
+    bb = cmds.exactWorldBoundingBox(shapes)
+    return tuple(bb[:3]), tuple(bb[3:])
+
+
+def fit_group_to_meshes(group, meshes):
+    """Scale and move a guide group so the character it describes is the
+    size of some meshes: as tall as they are, standing on their lowest
+    point, centred on them side to side and front to back.
+
+    The guides keep their own layout (only the group's transform changes),
+    so this works before OR after placing them, and the rig builders size
+    their controls and joints to the scaled guides. Returns the scale
+    factor, or None if there was nothing to fit."""
+    box = mesh_box(meshes)
+    if not box or not cmds.objExists(group):
+        return None
+    (x0, y0, z0), (x1, y1, z1) = box
+    height = y1 - y0
+    if height <= 1e-9:
+        return None
+    for attr, value in (("scale", (1.0, 1.0, 1.0)),
+                        ("translate", (0.0, 0.0, 0.0)),
+                        ("rotate", (0.0, 0.0, 0.0))):
+        try:
+            cmds.setAttr(group + "." + attr, *value)
+        except RuntimeError:
+            pass
+    # The guides as authored: the ground is y 0 and they stand on it.
+    kids = cmds.listRelatives(group, ad=True, type="transform", f=True) or []
+    ys = [cmds.xform(k, q=True, ws=True, t=True)[1] for k in kids]
+    top = max(ys) if ys else 0.0
+    bottom = min([0.0] + ys)
+    span = top - bottom
+    if span <= 1e-9:
+        return None
+    s = height / span
+    cmds.setAttr(group + ".scale", s, s, s)
+    cmds.setAttr(group + ".translate", 0.5 * (x0 + x1), y0 - s * bottom,
+                 0.5 * (z0 + z1))
+    print("[guides] Fitted to the selected mesh: %.4gx the default size, "
+          "%.4g units tall." % (s, height))
+    return s
+
+
 class GuideSystem(object):
 
     def __init__(self):
@@ -512,6 +568,12 @@ class GuideSystem(object):
 
     def exists(self):
         return cmds.objExists(GUIDES_GRP_NAME)
+
+    def fit_to_meshes(self, meshes):
+        """Size the guides to the selected model (see
+        fit_group_to_meshes)."""
+        self._refresh_handles()
+        return fit_group_to_meshes(GUIDES_GRP_NAME, meshes)
 
     def build(self):
         if self.exists():
@@ -1020,6 +1082,62 @@ class GuideSystem(object):
     # Read positions for CharacterRig
     # -----------------------------------------------------------------------
 
+    NECK_SEGMENT_MAX = 12
+
+    def neck_guides(self):
+        """The neck guides in order: C_neck, then C_neck_02 ... C_neck_NN."""
+        self._refresh_handles()
+        extra = sorted(n for n in self.guides
+                       if n.startswith("C_neck_") and n[7:].isdigit())
+        return ["C_neck"] + extra
+
+    def neck_segments(self):
+        """How many joints the neck has (1 = the classic biped)."""
+        return len(self.neck_guides())
+
+    def set_neck_segments(self, count):
+        """Give the neck `count` joints (1 to NECK_SEGMENT_MAX): a long
+        neck for a dragon, a horse or a swan. The extra guides are spaced
+        between the neck and head guides; they keep their places when the
+        count doesn't change. Returns how many guides changed."""
+        if not self.exists():
+            return 0
+        count = max(1, min(self.NECK_SEGMENT_MAX, int(count)))
+        have = self.neck_guides()
+        changed = 0
+        for name in have[count:]:              # too many: drop the extras
+            cmds.delete(self.guides.pop(name))
+            changed += 1
+        if count > len(have):
+            base, head = self._pos("C_neck"), self._pos("C_head")
+            for i in range(len(have) + 1, count + 1):
+                t = (i - 1) / float(count)
+                self._create_guide(
+                    "C_neck_%02d" % i,
+                    tuple(b + (h - b) * t for b, h in zip(base, head)),
+                    COLOR_CENTER)
+                changed += 1
+        if changed:
+            print("[GuideSystem] Neck is now %d joint(s)." % count)
+        return changed
+
+    def neck_ik(self):
+        """True if the neck builds with an IK spline and a head IK ctrl."""
+        grp = GUIDES_GRP_NAME
+        return bool(cmds.objExists(grp)
+                    and cmds.attributeQuery("neckIK", node=grp, exists=True)
+                    and cmds.getAttr(grp + ".neckIK"))
+
+    def set_neck_ik(self, on):
+        """Turn the IK neck on or off (it needs at least 2 neck joints)."""
+        grp = GUIDES_GRP_NAME
+        if not cmds.objExists(grp):
+            return False
+        if not cmds.attributeQuery("neckIK", node=grp, exists=True):
+            cmds.addAttr(grp, ln="neckIK", at="bool", k=True)
+        cmds.setAttr(grp + ".neckIK", bool(on))
+        return self.neck_ik()
+
     def read_positions(self):
         """Return a positions dict matching CharacterRig's expected schema."""
         if not self.exists():
@@ -1044,11 +1162,15 @@ class GuideSystem(object):
                 "fk_02": p("C_spine_02"),
                 "fk_03": p("C_spine_03"),
             },
-            "neck": {
-                "neck":     p("C_neck"),
-                "head":     p("C_head"),
-                "head_tip": p("C_headTip"),
-            },
+            "neck": dict(
+                {"neck":     p("C_neck"),
+                 "head":     p("C_head"),
+                 "head_tip": p("C_headTip"),
+                 # A long neck (dragon, horse, swan) bends on an IK spline
+                 # with a head IK control when this is on.
+                 "ik": self.neck_ik()},
+                **{n[2:].replace("neck_", "neck_"): p(n)
+                   for n in self.neck_guides()[1:]}),
             # clavicle_tip is derived from the shoulder position — both
             # sit at the same world point on a real anatomical clavicle,
             # so we drop the separate locator and let read_positions
@@ -1392,6 +1514,11 @@ class GuideSystem(object):
                 # belong to rig_creature, not to us.
                 if cmds.attributeQuery(CREATURE_TAG, node=node, exists=True):
                     continue
+                # A long neck's extra joints are ours, just not in the
+                # defaults (C_neck_02 ... C_neck_NN).
+                base = short[:-len(GUIDE_SUFFIX)]
+                if base.startswith("C_neck_") and base[7:].isdigit():
+                    continue
                 # Confirm it's actually a locator (has a locator shape).
                 shapes = cmds.listRelatives(node, s=True,
                                               type="locator") or []
@@ -1423,6 +1550,12 @@ class GuideSystem(object):
             loc = name + GUIDE_SUFFIX
             if cmds.objExists(loc):
                 self.guides[name] = loc
+        # A long neck's extra joints (C_neck_02 ... C_neck_NN).
+        for loc in cmds.ls("C_neck_??" + GUIDE_SUFFIX, type="transform") or []:
+            short = loc.split("|")[-1]
+            name = short[:-len(GUIDE_SUFFIX)]
+            if name[7:].isdigit():
+                self.guides[name] = short
 
     def _pos(self, name):
         loc = self.guides.get(name)

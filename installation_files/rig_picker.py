@@ -143,6 +143,7 @@ class PickerCanvas(QtWidgets.QFrame):
         self.buttons = []   # list of PickerButton instances
 
     def add(self, ctrl_name, label, x, y, w=56, h=18, color="C"):
+        ctrl_name, label = resolve_entry(ctrl_name, label)
         btn = PickerButton(ctrl_name, label, color, self)
         btn.setGeometry(x, y, w, h)
         # Disable + grey-out if the target ctrl doesn't exist (yet).
@@ -161,10 +162,23 @@ class PickerCanvas(QtWidgets.QFrame):
         self.buttons = []
 
 
+def resolve_entry(ctrl_name, label):
+    """A layout entry can list alternatives, "a|b" with labels "A|B", for a
+    button whose control depends on the build (a horse's knee, a cat's
+    wrist). Returns the first one in the scene, else the first."""
+    names = ctrl_name.split("|")
+    labels = label.split("|")
+    for i, name in enumerate(names):
+        if cmds.objExists(name):
+            return name, labels[min(i, len(labels) - 1)]
+    return names[0], labels[0]
+
+
 # =============================================================================
 # Layout data — per rig type, per tab
 #
 # Each entry: (ctrl_name, label, x, y, width, height, color_key)
+# ctrl_name / label may hold "|"-separated alternatives (see resolve_entry).
 #
 # Coordinates assume a 460x620 canvas. The canvas centre is at x=230.
 # =============================================================================
@@ -255,7 +269,7 @@ BIPED_BODY = [
 ]
 
 # -----------------------------------------------------------------------------
-# Quadruped (horse) — body
+# Quadruped (horse, cat / dog, raptor): body
 # Front legs near top, back legs near bottom, spine horizontal
 # -----------------------------------------------------------------------------
 
@@ -281,36 +295,54 @@ QUAD_BODY = [
     ("R_eye_aim_CTRL",   "R EYE", 60,  60, 30, 14, "R"),
     ("C_eyes_lookAt_CTRL", "LOOK",-10, 30, 50, 16, "C"),
 
-    # ---- Left front leg ----
-    ("L_frontLeg_scapula_FK_CTRL", "L SCAP",  90, 250, 60, 16, "L"),
-    ("L_frontLeg_shoulder_FK_CTRL", "L FR SH",105, 285, 60, 16, "L"),
-    ("L_frontLeg_elbow_FK_CTRL",   "L FR EL", 90, 325, 60, 16, "L"),
-    ("L_frontLeg_knee_FK_CTRL",    "L FR KN", 75, 370, 60, 16, "L"),
-    ("L_frontLeg_IK_CTRL",         "L FR IK",  90, 420, 60, 22, "IK"),
-    ("L_frontLeg_PV_CTRL",         "PV",       50, 325, 30, 16, "PV"),
-    ("L_frontLeg_SETTINGS_CTRL",   "L SET",    40, 285, 40, 16, "S"),
+    # ---- Left front leg (a raptor's arm: L_frontArm) ----
+    ("L_frontLeg_scapula_FK_CTRL|L_frontArm_scapula_FK_CTRL",
+     "L SCAP",  90, 250, 60, 16, "L"),
+    ("L_frontLeg_shoulder_FK_CTRL|L_frontArm_shoulder_FK_CTRL",
+     "L FR SH", 105, 285, 60, 16, "L"),
+    ("L_frontLeg_elbow_FK_CTRL|L_frontArm_elbow_FK_CTRL",
+     "L FR EL", 90, 325, 60, 16, "L"),
+    ("L_frontLeg_knee_FK_CTRL|L_frontLeg_wrist_FK_CTRL"
+     "|L_frontArm_wrist_FK_CTRL",
+     "L FR KN|L FR WR|L WRIST", 75, 370, 60, 16, "L"),
+    ("L_frontLeg_IK_CTRL|L_frontArm_IK_CTRL",
+     "L FR IK|L HAND", 90, 420, 60, 22, "IK"),
+    ("L_frontLeg_PV_CTRL|L_frontArm_PV_CTRL", "PV", 50, 325, 30, 16, "PV"),
+    ("L_frontLeg_SETTINGS_CTRL|L_frontArm_SETTINGS_CTRL",
+     "L SET", 40, 285, 40, 16, "S"),
 
     # ---- Right front leg ----
-    ("R_frontLeg_scapula_FK_CTRL", "R SCAP", 165, 250, 60, 16, "R"),
-    ("R_frontLeg_shoulder_FK_CTRL", "R FR SH",165, 285, 60, 16, "R"),
-    ("R_frontLeg_elbow_FK_CTRL",   "R FR EL",165, 325, 60, 16, "R"),
-    ("R_frontLeg_knee_FK_CTRL",    "R FR KN",165, 370, 60, 16, "R"),
-    ("R_frontLeg_IK_CTRL",         "R FR IK",165, 420, 60, 22, "IK"),
-    ("R_frontLeg_PV_CTRL",         "PV",     225, 325, 30, 16, "PV"),
-    ("R_frontLeg_SETTINGS_CTRL",   "R SET",  225, 285, 40, 16, "S"),
+    ("R_frontLeg_scapula_FK_CTRL|R_frontArm_scapula_FK_CTRL",
+     "R SCAP", 165, 250, 60, 16, "R"),
+    ("R_frontLeg_shoulder_FK_CTRL|R_frontArm_shoulder_FK_CTRL",
+     "R FR SH", 165, 285, 60, 16, "R"),
+    ("R_frontLeg_elbow_FK_CTRL|R_frontArm_elbow_FK_CTRL",
+     "R FR EL", 165, 325, 60, 16, "R"),
+    ("R_frontLeg_knee_FK_CTRL|R_frontLeg_wrist_FK_CTRL"
+     "|R_frontArm_wrist_FK_CTRL",
+     "R FR KN|R FR WR|R WRIST", 165, 370, 60, 16, "R"),
+    ("R_frontLeg_IK_CTRL|R_frontArm_IK_CTRL",
+     "R FR IK|R HAND", 165, 420, 60, 22, "IK"),
+    ("R_frontLeg_PV_CTRL|R_frontArm_PV_CTRL", "PV", 225, 325, 30, 16, "PV"),
+    ("R_frontLeg_SETTINGS_CTRL|R_frontArm_SETTINGS_CTRL",
+     "R SET", 225, 285, 40, 16, "S"),
 
-    # ---- Left back leg ----
+    # ---- Left back leg (hoof: stifle / hock, paw or claw: knee / ankle) ----
     ("L_backLeg_hip_FK_CTRL",     "L BK HIP", 270, 250, 60, 16, "L"),
-    ("L_backLeg_stifle_FK_CTRL",  "L STIFLE", 270, 285, 60, 16, "L"),
-    ("L_backLeg_hock_FK_CTRL",    "L HOCK",   270, 325, 60, 16, "L"),
+    ("L_backLeg_stifle_FK_CTRL|L_backLeg_knee_FK_CTRL",
+     "L STIFLE|L KNEE", 270, 285, 60, 16, "L"),
+    ("L_backLeg_hock_FK_CTRL|L_backLeg_ankle_FK_CTRL",
+     "L HOCK|L ANKLE", 270, 325, 60, 16, "L"),
     ("L_backLeg_IK_CTRL",         "L BK IK",  270, 420, 60, 22, "IK"),
     ("L_backLeg_PV_CTRL",         "PV",       230, 370, 30, 16, "PV"),
     ("L_backLeg_SETTINGS_CTRL",   "L SET",    230, 285, 40, 16, "S"),
 
     # ---- Right back leg ----
     ("R_backLeg_hip_FK_CTRL",     "R BK HIP", 345, 250, 60, 16, "R"),
-    ("R_backLeg_stifle_FK_CTRL",  "R STIFLE", 345, 285, 60, 16, "R"),
-    ("R_backLeg_hock_FK_CTRL",    "R HOCK",   345, 325, 60, 16, "R"),
+    ("R_backLeg_stifle_FK_CTRL|R_backLeg_knee_FK_CTRL",
+     "R STIFLE|R KNEE", 345, 285, 60, 16, "R"),
+    ("R_backLeg_hock_FK_CTRL|R_backLeg_ankle_FK_CTRL",
+     "R HOCK|R ANKLE", 345, 325, 60, 16, "R"),
     ("R_backLeg_IK_CTRL",         "R BK IK",  345, 420, 60, 22, "IK"),
     ("R_backLeg_PV_CTRL",         "PV",       405, 370, 30, 16, "PV"),
     ("R_backLeg_SETTINGS_CTRL",   "R SET",    405, 285, 40, 16, "S"),
@@ -324,7 +356,7 @@ QUAD_BODY = [
 ]
 
 # -----------------------------------------------------------------------------
-# Bird (raptor) — body
+# Bird (eagle / hawk): body
 # Wings extend wide, legs short, tail fan at the back
 # -----------------------------------------------------------------------------
 

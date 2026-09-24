@@ -3,6 +3,8 @@ Copyright (c) 2026 Danyal Tareen. All rights reserved.
 
 Plain-language summary (the numbered terms below are what counts):
   FREE to download and use — personal or commercial rigging work.
+  USING IT COMMERCIALLY? Tell me. One email, no fee, no permission
+    needed — I just want to know where it is being used.
   Everything you MAKE with it (rigs, animations, exports) is 100% YOURS.
   Don't resell it, don't re-host it, don't distribute modified versions.
   A credit is never required — but always appreciated.
@@ -11,36 +13,45 @@ Plain-language summary (the numbered terms below are what counts):
    to download, install, and use Danyal's Rig Builder ("the Tool") for
    personal and commercial character/vehicle rigging work.
 
-2. YOUR OUTPUT IS YOURS. Any rigs, skeletons, animations, scenes, or
+2. COMMERCIAL USE — LET ME KNOW. Commercial use costs nothing, but if
+   you use the Tool for commercial work (client jobs, studio production,
+   a game, film or asset you sell, anything you are paid for), you must
+   tell me: one email to dannytareen21@gmail.com, or an issue on the
+   project page, with who you are and roughly what you are using it on.
+   It is a notification, not a request for permission, and there is no
+   fee, no licence key and nothing to sign. Personal, learning, student
+   and hobby use needs no notice.
+
+3. YOUR OUTPUT IS YOURS. Any rigs, skeletons, animations, scenes, or
    exports you create USING the Tool belong entirely to you, with no
    attribution required.
 
-3. OWNERSHIP. The Tool, its source code, and its design remain the sole
+4. OWNERSHIP. The Tool, its source code, and its design remain the sole
    property of Danyal Tareen. Using the Tool grants you no ownership of it.
 
-4. NO RESALE / NO REDISTRIBUTION. You may not sell, rent, sublicense, or
+5. NO RESALE / NO REDISTRIBUTION. You may not sell, rent, sublicense, or
    otherwise charge for the Tool or any part of it; you may not re-host or
    redistribute it (modified or unmodified) — instead, share the official
    download link.
 
-5. NO DERIVATIVE DISTRIBUTION. You may tweak the code privately for your
+6. NO DERIVATIVE DISTRIBUTION. You may tweak the code privately for your
    own use, but you may not distribute modified versions or use the code
    in another product.
 
-6. CREDIT (OPTIONAL, APPRECIATED). No attribution is required. That said,
+7. CREDIT (OPTIONAL, APPRECIATED). No attribution is required. That said,
    if the Tool helped ship your project, a mention — "Rigged with Danyal's
    Rig Builder" — in your credits, description, or portfolio post would
    mean a lot. It's how a free tool survives.
 
-7. TELEMETRY. The Tool sends a small anonymous install/first-launch ping
+8. TELEMETRY. The Tool sends a small anonymous install/first-launch ping
    (random ID, tool + Maya version, OS — no personal data). Full disclosure
    and opt-out instructions are in rig_telemetry.py and the README.
 
-8. NO WARRANTY. The Tool is provided "AS IS", without warranty of any
+9. NO WARRANTY. The Tool is provided "AS IS", without warranty of any
    kind. In no event shall the author be liable for any claim, damages, or
    other liability arising from use of the Tool. Always save your work.
 
-9. TERMINATION. This license ends automatically if you breach these terms.
+10. TERMINATION. This license ends automatically if you breach these terms.
 
 For permissions beyond this license (studio deployment, bundling, etc.),
 contact: dannytareen21@gmail.com

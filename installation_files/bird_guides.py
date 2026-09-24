@@ -121,6 +121,12 @@ class BirdGuideSystem(object):
     def exists(self):
         return cmds.objExists(GUIDES_GRP_NAME)
 
+    def fit_to_meshes(self, meshes):
+        """Size the guides to the selected model (rig_guides
+        .fit_group_to_meshes)."""
+        import rig_guides
+        return rig_guides.fit_group_to_meshes(GUIDES_GRP_NAME, meshes)
+
     def build(self):
         if self.exists():
             cmds.warning(f"{GUIDES_GRP_NAME} already exists. "

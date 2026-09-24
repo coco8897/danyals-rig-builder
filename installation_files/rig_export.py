@@ -3,7 +3,30 @@
  RIG EXPORT — game-skeleton helpers + FBX export for Unreal / Unity
 ===============================================================================
 
- Three entry points:
+ Exporting never changes the working rig. Both exports build a temporary,
+ clean skeleton at the world root with the same bone names (an optional
+ ground `root` bone, then C_root_BIND_JNT and every deform joint), bake or
+ hold it, write the FBX and delete it. The file holds real joints only: no
+ controls, groups or constraints.
+
+   export_rig_fbx(filepath, include_mesh=True, include_bendy=False,
+                  ground_root=True)
+       The skeleton in the rest pose, plus a copy of every skinned mesh
+       bound to it with the same weights.
+
+   export_animation_fbx(filepath, start, end, include_bendy=False,
+                        ground_root=True, in_place=False, take=None)
+       The bones animated over a frame range (one take). With
+       ground_root the `root` bone carries the travel (root motion);
+       in_place keeps the character at the origin.
+
+   add_clip / list_clips / remove_clip / export_clips
+       Named frame ranges saved with the scene, exported one file each.
+
+ Use the same ground_root setting for a rig and its animations so the
+ skeletons match in the engine.
+
+ Older helper, still available (not needed for exporting):
 
    organize_for_game_export()
        Reparents every BIND joint chain that is currently a top-level child
@@ -20,22 +43,15 @@
        driven by a constraint on the joint itself, not by parent-space
        inheritance. Reparenting BIND joints does not break the rig.
 
-   export_rig_fbx(filepath, include_mesh=True, include_bendy=False)
-       Selects the BIND skeleton starting at C_root_BIND_JNT (+ optionally
-       the geo group) and exports an FBX with skinning info. No animation.
-       Use this to push the asset into Unreal / Unity for the first time.
-
-   export_animation_fbx(filepath, start=None, end=None,
-                         include_bendy=False)
-       Bakes every BIND joint's animation over the time range, selects the
-       BIND skeleton, and exports an FBX with animation only. Use this to
-       export takes / cycles into the engine.
-
- All three functions are rig-type-agnostic — they work the same on the
+ Everything is rig-type-agnostic — they work the same on the
  biped CharacterRig, the QuadrupedRig, or the BirdRig as long as the
  standard CoreRig built `C_root_BIND_JNT` as the root.
 ===============================================================================
 """
+
+import json
+import os
+import re
 
 import maya.cmds as cmds
 import maya.mel as mel
@@ -172,14 +188,19 @@ def face_joints_under_head(verbose=True):
     for pat in ("*_lid*_BIND_JNT", "*_lip*_BIND_JNT"):
         faces.update(cmds.ls(pat, type="joint") or [])
     for j in sorted(faces):
-        # only the PCI-driven detail joints
-        pci = None
-        for s in (cmds.listConnections(f"{j}.translate", s=True, d=False)
-                  or []):
-            if cmds.objectType(s) == "pointOnCurveInfo":
-                pci = s
-                break
-        if not pci:
+        # only the curve-driven detail joints: straight off the curve, or
+        # through a lid seal / tweak control (all world positions)
+        src = (cmds.listConnections(f"{j}.translate", s=True, d=False,
+                                    p=True) or [None])[0]
+        if not src:
+            continue
+        try:
+            import advanced_face
+            curve_driven = advanced_face._base_source(j)[1] is not None
+        except ImportError:
+            curve_driven = cmds.objectType(src.split(".")[0]) == \
+                "pointOnCurveInfo"
+        if not curve_driven:
             continue
         # deform target = the joint's orientConstraint target (head or jaw)
         tgt = None
@@ -195,9 +216,9 @@ def face_joints_under_head(verbose=True):
             continue                                # already converted
         # world (PCI) -> target-local
         pmm = cmds.createNode("pointMatrixMult", n=f"{j}_toLocal_PMM")
-        cmds.connectAttr(f"{pci}.position", f"{pmm}.inPoint")
+        cmds.connectAttr(src, f"{pmm}.inPoint")
         cmds.connectAttr(f"{tgt}.worldInverseMatrix[0]", f"{pmm}.inMatrix")
-        cmds.disconnectAttr(f"{pci}.position", f"{j}.translate")
+        cmds.disconnectAttr(src, f"{j}.translate")
         # drop the orient/scale constraints — the joint now INHERITS the
         # target's rotation + scale by being its child.
         for ctyp in ("orientConstraint", "scaleConstraint"):
@@ -281,20 +302,394 @@ def organize_for_game_export(verbose=True, face_under_head=True):
     return reparented
 
 
+
+
 # =============================================================================
-# 2. FBX export — rig (skeleton + skinning, no animation)
+# 2. The export skeleton
+# =============================================================================
+# Exports never touch the working rig. A temporary, clean copy of the
+# deform skeleton is built at the world root with the SAME bone names, each
+# bone following its rig joint through a matrix link, then baked, exported
+# and deleted. So the file holds only real joints (no controls, groups or
+# constraints), animation keys live on the bones alone, and the rig keeps
+# working afterwards.
+
+GROUND_ROOT = "root"
+CLIPS_NODE = "DRB_exportClips"
+_TR = ("translateX", "translateY", "translateZ",
+       "rotateX", "rotateY", "rotateZ", "scaleX", "scaleY", "scaleZ")
+
+
+def _long(node):
+    found = cmds.ls(node, l=True) or []
+    return found[0] if found else None
+
+
+def _in_rig(node):
+    """True for nodes inside a rig's own groups (ribbon surfaces etc.)."""
+    top = (_long(node) or "").split("|")
+    return len(top) > 1 and top[1].endswith("_RIG_GRP")
+
+
+def _character_skins():
+    """(mesh transform, skinCluster) for every polygon mesh the user skinned
+    (the rig's own skinned ribbon surfaces don't count)."""
+    out = []
+    for sc in cmds.ls(type="skinCluster") or []:
+        for shape in cmds.skinCluster(sc, q=True, g=True) or []:
+            if cmds.nodeType(shape) != "mesh" or _in_rig(shape):
+                continue
+            xf = cmds.listRelatives(shape, p=True, f=True)
+            if xf:
+                out.append((xf[0], sc))
+    return out
+
+
+def _skin_influences():
+    """Every joint the character's skinned meshes deform with."""
+    out = set()
+    for _mesh, sc in _character_skins():
+        for inf in cmds.skinCluster(sc, q=True, inf=True) or []:
+            if cmds.objectType(inf) == "joint":
+                out.add(_long(inf))
+    return out
+
+
+def export_joint_plan(include_bendy=False):
+    """The bones to export, parents first: [(rig joint long name, bone name,
+    parent rig joint long name or None)].
+
+    Each bone's parent is its nearest exported ancestor in the rig; a joint
+    with none takes the joint it's constrained to (the face lids follow the
+    head), else C_root_BIND_JNT. Joints the skin uses are always included,
+    so a mesh bound to ribbon joints keeps its weights."""
+    root = _long(ROOT_BIND)
+    if not root:
+        return []
+    live = {_long(j) for j in _exportable_bind_joints(include_bendy)}
+    live |= _skin_influences()
+    live.add(root)
+    live.discard(None)
+    # Props in the same scene export on their own (prop_rig.export_fbx).
+    live = {j for j in live
+            if not cmds.attributeQuery("propRig", node=j, exists=True)}
+
+    def game_parent(j):
+        if j == root:
+            return None
+        up = cmds.listRelatives(j, p=True, f=True)
+        while up:
+            if up[0] in live:
+                return up[0]
+            up = cmds.listRelatives(up[0], p=True, f=True)
+        for ctype in ("parentConstraint", "orientConstraint",
+                      "pointConstraint"):
+            for c in set(cmds.listConnections(j, s=True, d=False,
+                                              type=ctype) or []):
+                query = getattr(cmds, ctype)
+                for t in query(c, q=True, tl=True) or []:
+                    tl = _long(t)
+                    if tl in live and tl != j:
+                        return tl
+        return root
+
+    parents = {j: game_parent(j) for j in live}
+    for j in live:                                   # no loops
+        seen, cur = set(), j
+        while cur is not None:
+            if cur in seen:
+                parents[j] = root if j != root else None
+                break
+            seen.add(cur)
+            cur = parents.get(cur)
+    order, placed = [], set()
+
+    def place(j):
+        if j in placed:
+            return
+        if parents[j] is not None:
+            place(parents[j])
+        placed.add(j)
+        order.append(j)
+
+    place(root)
+    for j in sorted(live):
+        place(j)
+    return [(j, j.split("|")[-1], parents[j]) for j in order]
+
+
+class _ExportSkeleton(object):
+    """Temporary world-level copy of the deform skeleton that follows the
+    rig. With root motion, an optional ground `root` bone follows
+    C_global_CTRL; in place, everything is measured in the character's own
+    space instead, so the character stays at the origin."""
+
+    def __init__(self, plan, ground_root=True, in_place=False):
+        self.plan = plan
+        self.ground_root = ground_root
+        self.in_place = in_place
+        self.bones = {}          # rig joint long name -> bone long name
+        self.top = None
+        self.utility = []
+
+    def build(self):
+        g = "C_global_CTRL" if cmds.objExists("C_global_CTRL") else None
+        if self.ground_root:
+            self.top = _long(cmds.createNode("joint", n=GROUND_ROOT))
+            cmds.setAttr(self.top + ".segmentScaleCompensate", 0)
+            if g and not self.in_place:
+                self._drive(self.top, g, None)
+        for live, name, parent in self.plan:
+            par = self.bones.get(parent) if parent else self.top
+            node = (cmds.createNode("joint", n=name, p=par) if par
+                    else cmds.createNode("joint", n=name))
+            node = _long(node)
+            if self.top is None:
+                self.top = node
+            self.bones[live] = node
+            self._drive(node, live, par)
+        return self
+
+    def _drive(self, bone, live, parent_bone):
+        cmds.setAttr(bone + ".segmentScaleCompensate", 0)
+        mm = cmds.createNode("multMatrix", n="drbExport_MM")
+        dm = cmds.createNode("decomposeMatrix", n="drbExport_DM")
+        self.utility += [mm, dm]
+        cmds.connectAttr(live + ".worldMatrix[0]", mm + ".matrixIn[0]")
+        if self.in_place and cmds.objExists("C_global_CTRL"):
+            cmds.connectAttr("C_global_CTRL.worldInverseMatrix[0]",
+                             mm + ".matrixIn[1]")
+        if parent_bone:
+            cmds.connectAttr(parent_bone + ".worldInverseMatrix[0]",
+                             mm + ".matrixIn[2]")
+        cmds.connectAttr(mm + ".matrixSum", dm + ".inputMatrix")
+        for out, attr in (("outputTranslate", "translate"),
+                          ("outputRotate", "rotate"),
+                          ("outputScale", "scale")):
+            cmds.connectAttr("%s.%s" % (dm, out), "%s.%s" % (bone, attr))
+
+    def all_bones(self):
+        bones = list(self.bones.values())
+        if self.top not in bones:
+            bones.insert(0, self.top)
+        return bones
+
+    def bake(self, start, end, step=1.0):
+        bones = self.all_bones()
+        cmds.bakeResults(bones, time=(start, end), simulation=True,
+                         sampleBy=step, disableImplicitControl=True,
+                         preserveOutsideKeys=False, sparseAnimCurveBake=False,
+                         minimizeRotation=True, attribute=list(_TR))
+        curves = cmds.listConnections(
+            ["%s.rotate%s" % (b, a) for b in bones for a in "XYZ"],
+            s=True, d=False, type="animCurve") or []
+        if curves:
+            cmds.filterCurve(curves, filter="euler")
+        self._drop_utility()
+
+    def freeze(self):
+        """Hold the current pose as plain values (a static skeleton)."""
+        values = {b: [cmds.getAttr("%s.%s" % (b, a)) for a in _TR]
+                  for b in self.all_bones()}
+        self._drop_utility()
+        for b, vals in values.items():
+            for a, v in zip(_TR, vals):
+                cmds.setAttr("%s.%s" % (b, a), v)
+
+    def _drop_utility(self):
+        for n in self.utility:
+            if cmds.objExists(n):
+                cmds.delete(n)
+        self.utility = []
+
+    def delete(self):
+        self._drop_utility()
+        if self.top and cmds.objExists(self.top):
+            cmds.delete(self.top)
+
+
+class _rest_pose(object):
+    """Every control at zero (the pose the rig was built and bound in) while
+    the block runs; the animation comes back afterwards."""
+
+    def __enter__(self):
+        self.held = []
+        for ctrl in cmds.ls("*_CTRL", type="transform") or []:
+            for a in ("translateX", "translateY", "translateZ",
+                      "rotateX", "rotateY", "rotateZ"):
+                plug = "%s.%s" % (ctrl, a)
+                try:
+                    if (cmds.getAttr(plug, lock=True)
+                            or not cmds.getAttr(plug, se=True)):
+                        continue
+                    self.held.append((plug, cmds.getAttr(plug)))
+                    cmds.setAttr(plug, 0.0)
+                except (RuntimeError, ValueError):
+                    pass
+        # A baked tail swing (chain_sim) or cargo shake (vehicle_cargo) is
+        # animation too: switch it off.
+        dials = []
+        for ctrl in (cmds.ls("*_SETTINGS_CTRL", "*_cargo_CTRL",
+                             type="transform") or []):
+            if cmds.attributeQuery("physics", node=ctrl, exists=True):
+                dials.append(ctrl + ".physics")
+        # So are the face shape dials (face_shapes).
+        if cmds.objExists("C_faceShapes_CTRL"):
+            dials += ["C_faceShapes_CTRL." + a for a in cmds.listAttr(
+                "C_faceShapes_CTRL", ud=True, k=True) or []]
+        # And a car's crash dents (vehicle_crash): export the car undamaged.
+        if cmds.objExists("C_chassis_CTRL") and cmds.attributeQuery(
+                "crashDamage", node="C_chassis_CTRL", exists=True):
+            dials.append("C_chassis_CTRL.crashDamage")
+        for plug in dials:
+            try:
+                if (not cmds.getAttr(plug, lock=True)
+                        and cmds.getAttr(plug, se=True)):
+                    self.held.append((plug, cmds.getAttr(plug)))
+                    cmds.setAttr(plug, 0.0)
+            except (RuntimeError, ValueError):
+                pass
+        return self
+
+    def __exit__(self, *exc):
+        for plug, value in self.held:
+            if not cmds.keyframe(plug, q=True, keyframeCount=True):
+                try:
+                    cmds.setAttr(plug, value)
+                except RuntimeError:
+                    pass
+        cmds.currentTime(cmds.currentTime(q=True), edit=True)
+        return False
+
+
+def _skinned_meshes(bone_map):
+    """(mesh transform, skinCluster) pairs deformed by the exported joints."""
+    return [(mesh, sc) for mesh, sc in _character_skins()
+            if {_long(i) for i in cmds.skinCluster(sc, q=True, inf=True)
+                or []} & set(bone_map)]
+
+
+def _copy_skinned_mesh(mesh, sc, bone_map):
+    """A world-level duplicate of `mesh` skinned to the export bones with
+    the same weights. Returns the duplicate."""
+    import maya.api.OpenMaya as om2
+    import maya.api.OpenMayaAnim as oma2
+    short = mesh.split("|")[-1]
+    dup = _long(cmds.duplicate(mesh, rr=True)[0])
+    for shp in cmds.listRelatives(dup, s=True, f=True) or []:
+        if cmds.getAttr(shp + ".intermediateObject"):
+            cmds.delete(shp)
+    for a in _TR + ("visibility",):
+        cmds.setAttr("%s.%s" % (dup, a), lock=False)
+    if cmds.listRelatives(dup, p=True):
+        dup = _long(cmds.parent(dup, w=True)[0])
+    dup = _long(cmds.rename(dup, short))
+
+    def fn_for(node):
+        sel = om2.MSelectionList()
+        sel.add(node)
+        return oma2.MFnSkinCluster(sel.getDependNode(0))
+
+    def shape_path(node):
+        shapes = cmds.listRelatives(node, s=True, f=True, ni=True) or [node]
+        sel = om2.MSelectionList()
+        sel.add(shapes[0])
+        return sel.getDagPath(0)
+
+    live_fn = fn_for(sc)
+    live_infs = [p.fullPathName() for p in live_fn.influenceObjects()]
+    bones = [bone_map[i] for i in live_infs]
+    new_sc = cmds.skinCluster(bones, dup, toSelectedBones=True,
+                              maximumInfluences=cmds.skinCluster(
+                                  sc, q=True, mi=True) or 4,
+                              obeyMaxInfluences=False,
+                              n=short + "_export_skinCluster")[0]
+    new_fn = fn_for(new_sc)
+    new_order = [p.fullPathName() for p in new_fn.influenceObjects()]
+    live_path = shape_path(mesh)
+    new_path = shape_path(dup)
+    comp = om2.MFnSingleIndexedComponent()
+    comp_obj = comp.create(om2.MFn.kMeshVertComponent)
+    comp.setCompleteData(om2.MFnMesh(live_path).numVertices)
+    weights, _count = live_fn.getWeights(live_path, comp_obj)
+    indices = om2.MIntArray([new_order.index(b) for b in bones])
+    new_fn.setWeights(new_path, comp_obj, indices, weights, False)
+    return dup
+
+
+def _fbx_options(skins, animated, start=0, end=0, step=1):
+    mel.eval('FBXResetExport;')
+    mel.eval('FBXExportSmoothingGroups -v true;')
+    mel.eval('FBXExportInputConnections -v false;')
+    mel.eval('FBXExportConstraints -v false;')
+    mel.eval('FBXExportCameras -v false;')
+    mel.eval('FBXExportLights -v false;')
+    mel.eval('FBXExportSkins -v %s;' % ("true" if skins else "false"))
+    mel.eval('FBXExportShapes -v %s;' % ("true" if skins else "false"))
+    mel.eval('FBXExportEmbeddedTextures -v false;')
+    mel.eval('FBXExportAnimationOnly -v false;')
+    mel.eval('FBXExportUpAxis y;')
+    mel.eval('FBXExportInAscii -v false;')
+    mel.eval('FBXExportFileVersion -v "FBX201800";')
+    if animated:
+        mel.eval('FBXExportBakeComplexAnimation -v true;')
+        mel.eval('FBXExportBakeComplexStart -v %d;' % int(start))
+        mel.eval('FBXExportBakeComplexEnd -v %d;' % int(end))
+        mel.eval('FBXExportBakeComplexStep -v %d;' % max(1, int(round(step))))
+        # One take per file (engines name the animation after the file;
+        # extra named takes would import as extra animations).
+        mel.eval('FBXExportSplitAnimationIntoTakes -c;')
+    else:
+        mel.eval('FBXExportBakeComplexAnimation -v false;')
+
+
+def _write_fbx(filepath, nodes):
+    folder = os.path.dirname(filepath)
+    if folder and not os.path.isdir(folder):
+        os.makedirs(folder)
+    if os.path.isfile(filepath):
+        os.remove(filepath)
+    cmds.select(nodes, r=True)
+    safe = filepath.replace("\\", "/")
+    mel.eval('FBXExport -f "%s" -s;' % safe)
+    return os.path.isfile(filepath)
+
+
+class _keep_scene_state(object):
+    def __enter__(self):
+        self.sel = cmds.ls(sl=True, l=True) or []
+        self.time = cmds.currentTime(q=True)
+        return self
+
+    def __exit__(self, *exc):
+        cmds.currentTime(self.time, edit=True)
+        live = [n for n in self.sel if cmds.objExists(n)]
+        if live:
+            cmds.select(live, r=True)
+        else:
+            cmds.select(cl=True)
+        return False
+
+
+# =============================================================================
+# 3. FBX export — rig (skeleton + skinned mesh)
 # =============================================================================
 
 def export_rig_fbx(filepath, include_mesh=True, include_bendy=False,
-                    organize_first=True):
-    """Export the BIND skeleton (+ optionally the skinned mesh) to FBX.
+                   organize_first=False, ground_root=True):
+    """Export the skeleton (+ the skinned meshes) to FBX, in the rest pose.
+
+    The rig is left exactly as it was. Every mesh skinned to the skeleton
+    is exported as a copy bound to the export bones with the same weights.
 
     Args:
-        filepath: where to save the .fbx file (absolute path).
-        include_mesh: include the geometry group if found.
-        include_bendy: include ribbon-bendy joints (off by default).
-        organize_first: auto-run organize_for_game_export() so loose
-            anchor chains end up under the root before exporting.
+        include_mesh: include the skinned meshes.
+        include_bendy: include ribbon bendy joints (joints the skin uses
+            are always included).
+        organize_first: also run Make Game Skeleton on the rig (not needed
+            for exporting; kept for older scripts).
+        ground_root: add a `root` bone at the ground above the skeleton
+            (use the same setting for the rig and its animations).
 
     Returns the filepath on success, None on failure.
     """
@@ -303,75 +698,57 @@ def export_rig_fbx(filepath, include_mesh=True, include_bendy=False,
         return None
     if not _ensure_fbx_loaded():
         return None
-
     if organize_first:
         organize_for_game_export(verbose=False)
-
-    # Build the selection: root + every exportable BIND joint + mesh.
-    to_export = [ROOT_BIND]
-    to_export += [j for j in _exportable_bind_joints(include_bendy)
-                   if j != ROOT_BIND]
-    # Mesh — use the same lookup logic as CoreRig._find_geo_group.
-    geo_grp = None
-    if include_mesh:
-        for name in ("geo", "Geo", "GEO", "geometry",
-                      "Geometry", "GEOMETRY", "meshes", "MESHES"):
-            if cmds.objExists(name):
-                geo_grp = name
-                break
-        if not geo_grp:
-            # Any top-level transform with "geo" in its name.
-            for top in (cmds.ls(assemblies=True) or []):
-                if "geo" in top.lower():
-                    geo_grp = top
-                    break
-        if geo_grp:
-            to_export.append(geo_grp)
-
-    cmds.select(to_export, r=True)
-
-    # FBX options — push the static-rig flavor.
-    mel.eval('FBXResetExport;')
-    mel.eval('FBXExportSmoothingGroups -v true;')
-    mel.eval('FBXExportInputConnections -v false;')
-    mel.eval('FBXExportShapes -v true;')
-    mel.eval('FBXExportSkins -v true;')
-    mel.eval('FBXExportConstraints -v false;')
-    mel.eval('FBXExportEmbeddedTextures -v false;')
-    mel.eval('FBXExportAnimationOnly -v false;')
-    mel.eval('FBXExportBakeComplexAnimation -v false;')
-    mel.eval('FBXExportInAscii -v false;')
-    mel.eval('FBXExportFileVersion -v "FBX201800";')
-
-    # Export selected.
-    safe_path = filepath.replace("\\", "/")
-    try:
-        cmds.file(safe_path, force=True, options="v=0;",
-                   type="FBX export", pr=True, es=True)
-    except RuntimeError as e:
-        cmds.warning(f"FBX export failed: {e}")
-        return None
-
-    print(f"[rig_export] Rig exported to {filepath}")
+    plan = export_joint_plan(include_bendy)
+    skel = None
+    copies = []
+    with _keep_scene_state():
+        try:
+            with _rest_pose():
+                skel = _ExportSkeleton(plan, ground_root=ground_root).build()
+                skel.freeze()
+                if include_mesh:
+                    for mesh, sc in _skinned_meshes(skel.bones):
+                        copies.append(_copy_skinned_mesh(mesh, sc, skel.bones))
+            _fbx_options(skins=bool(copies), animated=False)
+            if not _write_fbx(filepath, [skel.top] + copies):
+                cmds.warning("FBX export failed: nothing written.")
+                return None
+        except RuntimeError as e:
+            cmds.warning(f"FBX export failed: {e}")
+            return None
+        finally:
+            for c in copies:
+                if cmds.objExists(c):
+                    cmds.delete(c)
+            if skel:
+                skel.delete()
+    print(f"[rig_export] Rig exported to {filepath} ({len(plan)} bones, "
+          f"{len(copies)} skinned mesh(es)).")
     return filepath
 
 
 # =============================================================================
-# 3. FBX export — animation only (bake then export)
+# 4. FBX export — animation
 # =============================================================================
 
 def export_animation_fbx(filepath, start=None, end=None,
-                          include_bendy=False, organize_first=True,
-                          bake_step=1.0):
-    """Bake animation onto BIND joints and export as FBX.
+                         include_bendy=False, organize_first=False,
+                         bake_step=1.0, ground_root=True, in_place=False,
+                         take=None):
+    """Export the animation over [start, end] (default: playback range) as
+    an FBX of the skeleton's bones, animated. Nothing else goes in the file.
+
+    The rig is left exactly as it was: no keys are added to it and nothing
+    is re-parented or disconnected.
 
     Args:
-        filepath: where to save the .fbx file.
-        start, end: time range; defaults to the playback range.
-        include_bendy: include ribbon-bendy joints in the bake (off by
-            default — large overhead and most engines don't want them).
-        organize_first: run organize_for_game_export() first.
-        bake_step: bake sample step in frames (1.0 = every frame).
+        ground_root: a `root` bone at the ground carries the character's
+            travel (root motion). Match the setting used for the rig export.
+        in_place: remove the travel so the character stays at the origin.
+        take: the clip name, for the log (the file name names the
+            animation in the engine).
 
     Returns the filepath on success, None on failure.
     """
@@ -380,64 +757,90 @@ def export_animation_fbx(filepath, start=None, end=None,
         return None
     if not _ensure_fbx_loaded():
         return None
-
     if start is None:
         start = cmds.playbackOptions(q=True, min=True)
     if end is None:
         end = cmds.playbackOptions(q=True, max=True)
-
+    if end <= start:
+        cmds.warning("Animation export needs a range of at least 2 frames.")
+        return None
     if organize_first:
         organize_for_game_export(verbose=False)
-
-    bind_joints = _exportable_bind_joints(include_bendy)
-    if not bind_joints:
-        cmds.warning("No BIND joints found to bake.")
-        return None
-
-    # Bake all attributes (translate, rotate, scale) onto BIND joints.
-    # disableImplicitControl=True severs the constraint feed during bake
-    # so the curves we just baked stay as the only animation source.
-    cmds.bakeResults(
-        bind_joints,
-        simulation=True,
-        time=(start, end),
-        sampleBy=bake_step,
-        oversamplingRate=1,
-        disableImplicitControl=True,
-        preserveOutsideKeys=True,
-        sparseAnimCurveBake=False,
-        removeBakedAttributeFromLayer=False,
-        removeBakedAnimFromLayer=False,
-        bakeOnOverrideLayer=False,
-        minimizeRotation=True,
-        controlPoints=False,
-        shape=False,
-    )
-
-    cmds.select([ROOT_BIND] + bind_joints, r=True)
-
-    mel.eval('FBXResetExport;')
-    mel.eval('FBXExportSmoothingGroups -v true;')
-    mel.eval('FBXExportInputConnections -v false;')
-    mel.eval('FBXExportShapes -v false;')
-    mel.eval('FBXExportSkins -v false;')
-    mel.eval('FBXExportConstraints -v false;')
-    mel.eval('FBXExportAnimationOnly -v true;')
-    mel.eval('FBXExportBakeComplexAnimation -v true;')
-    mel.eval(f'FBXExportBakeComplexStart -v {int(start)};')
-    mel.eval(f'FBXExportBakeComplexEnd -v {int(end)};')
-    mel.eval(f'FBXExportBakeComplexStep -v {int(round(bake_step))};')
-    mel.eval('FBXExportInAscii -v false;')
-    mel.eval('FBXExportFileVersion -v "FBX201800";')
-
-    safe_path = filepath.replace("\\", "/")
-    try:
-        cmds.file(safe_path, force=True, options="v=0;",
-                   type="FBX export", pr=True, es=True)
-    except RuntimeError as e:
-        cmds.warning(f"FBX export failed: {e}")
-        return None
-
-    print(f"[rig_export] Animation ({int(start)}-{int(end)}) "
-          f"exported to {filepath}")
+    take = take or os.path.splitext(os.path.basename(filepath))[0]
+    plan = export_joint_plan(include_bendy)
+    skel = None
+    with _keep_scene_state():
+        try:
+            skel = _ExportSkeleton(plan, ground_root=ground_root,
+                                   in_place=in_place).build()
+            skel.bake(start, end, bake_step)
+            _fbx_options(skins=False, animated=True, start=start, end=end,
+                         step=bake_step)
+            if not _write_fbx(filepath, [skel.top]):
+                cmds.warning("FBX export failed: nothing written.")
+                return None
+        except RuntimeError as e:
+            cmds.warning(f"FBX export failed: {e}")
+            return None
+        finally:
+            if skel:
+                skel.delete()
+    print(f"[rig_export] Animation '{take}' ({int(start)}-{int(end)}, "
+          f"{len(plan)} bones) exported to {filepath}")
     return filepath
+
+
+# =============================================================================
+# 5. Clips: named frame ranges, exported in one go
+# =============================================================================
+
+def list_clips():
+    """[{"name", "start", "end"}] saved with the scene."""
+    if not cmds.objExists(CLIPS_NODE):
+        return []
+    try:
+        return json.loads(cmds.getAttr(CLIPS_NODE + ".clips") or "[]")
+    except ValueError:
+        return []
+
+
+def _save_clips(clips):
+    if not cmds.objExists(CLIPS_NODE):
+        cmds.createNode("network", n=CLIPS_NODE)
+        cmds.addAttr(CLIPS_NODE, ln="clips", dt="string")
+    cmds.setAttr(CLIPS_NODE + ".clips", json.dumps(clips), type="string")
+
+
+def add_clip(name, start, end):
+    """Save (or update) a named clip."""
+    name = str(name).strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_\-]*$", name):
+        raise ValueError("clip names use letters, digits, _ and - "
+                         "(the name becomes the file name)")
+    if end <= start:
+        raise ValueError("a clip needs an end frame after its start")
+    clips = [c for c in list_clips() if c["name"] != name]
+    clips.append({"name": name, "start": float(start), "end": float(end)})
+    clips.sort(key=lambda c: c["start"])
+    _save_clips(clips)
+    return clips
+
+
+def remove_clip(name):
+    clips = [c for c in list_clips() if c["name"] != name]
+    _save_clips(clips)
+    return clips
+
+
+def export_clips(folder, include_bendy=False, ground_root=True,
+                 in_place=False, clips=None):
+    """Export every clip to `folder` as <clip name>.fbx. Returns the files."""
+    written = []
+    for clip in (list_clips() if clips is None else clips):
+        path = os.path.join(folder, clip["name"] + ".fbx")
+        if export_animation_fbx(path, clip["start"], clip["end"],
+                                include_bendy=include_bendy,
+                                ground_root=ground_root, in_place=in_place,
+                                take=clip["name"]):
+            written.append(path)
+    return written

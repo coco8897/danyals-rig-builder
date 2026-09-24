@@ -218,6 +218,11 @@ def _limb_info(prefix):
         return _ARM_PARTS, "wrist"
     if prefix.endswith("_leg"):
         return _LEG_PARTS, "ankle"
+    # A quadruped paw / claw leg stands on its wrist or ankle chain but has
+    # no biped foot (ball + toe); matching it as an arm or leg would pop.
+    if (cmds.objExists(f"{prefix}_toeBend_LOC")
+            and not cmds.objExists(f"{prefix}_toe_BIND_JNT")):
+        return None, None
     # Labelled extra limbs (L_lowerArm, R_midLeg...): tell arm from leg by
     # which end joint the chain has.
     if cmds.objExists(f"{prefix}_wrist_BIND_JNT"):

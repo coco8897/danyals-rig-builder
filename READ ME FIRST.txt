@@ -1,5 +1,5 @@
 ===============================================================
- DANYAL'S RIG BUILDER  v1.0.2
+ DANYAL'S RIG BUILDER  v1.0.3
  Free auto-rigging toolset for Autodesk Maya (2022 to 2026)
 ===============================================================
 
@@ -28,11 +28,17 @@
                   Start here.
  CREATURES.md   - extra arms, legs, wings and tails: four-armed
                   characters, centaurs, insects and more.
+ VEHICLES.md    - cars, trucks, tanks and motorcycles:
+                  driving, physics, turrets, excavator arms,
+                  trailers, crash damage, tyre tracks and
+                  burnouts.
  PIPELINE.md    - for animators / tech animators / teams:
                   naming, hierarchy, handoff, referencing,
                   and the do's and don'ts.
  README.md      - feature overview and project info.
- LICENSE.txt    - terms (free for personal AND commercial use).
+ LICENSE.txt    - terms (free for personal AND commercial use;
+                  if you use it commercially, email me so I
+                  know where it is being used - no fee).
 
  The .md files are plain text - if double-clicking asks which
  program to use, choose Notepad, or read them online at the

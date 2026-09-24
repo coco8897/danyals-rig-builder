@@ -29,10 +29,12 @@ except ImportError:                                  # Maya 2025+ (Qt6)
     from shiboken6 import wrapInstance
 
 import advanced_face
+import face_shapes
 import forge_theme as ft
 import rig_face_presets
 from importlib import reload as _reload
 _reload(advanced_face)
+_reload(face_shapes)
 _reload(rig_face_presets)
 
 
@@ -206,19 +208,30 @@ class AdvancedFaceUI(QtWidgets.QDialog):
         self.btn_attach.clicked.connect(self._on_attach_head)
         root.addWidget(self.btn_attach)
 
-        # One-click skin: select the mesh -> bind to the face joints.
+        self.btn_repair = QtWidgets.QPushButton(
+            "Repair Face  (lids close fully, mouth corners)")
+        self.btn_repair.setToolTip(
+            "For a face built with an older version, no rebuild needed:\n"
+            "a full blink seals the WHOLE lash line (no joint left a little\n"
+            "open), the mouth corner controls work, and the smile lifts the\n"
+            "cheeks. Safe to click again.")
+        self.btn_repair.clicked.connect(self._on_repair)
+        root.addWidget(self.btn_repair)
+
+        # One-click skin: select the meshes -> each is bound the right way.
         self.btn_bind = QtWidgets.QPushButton(
-            "Bind Selected Face Mesh  →  Face Joints")
+            "Smart Bind Face  (one mesh or many)")
         self.btn_bind.setObjectName("primary")
         self.btn_bind.setStyleSheet(
             "QPushButton { padding: 7px; }")
         self.btn_bind.setToolTip(
-            "Select your face geo in the viewport, then click this. It\n"
-            "smooth-binds the mesh to every face joint (lids, lips, head,\n"
-            "jaw, eyes...) with closest-point weights — so the blink and\n"
-            "mouth drive it right away. Replaces any existing skin; refine\n"
-            "afterwards with weight paint. (Select several meshes to bind\n"
-            "them all.)")
+            "Select the character's meshes (or nothing: everything in the\n"
+            "'geo' group) and click. Safe on ONE head + body mesh: the body\n"
+            "keeps its skin (or gets one), and only the face is layered on\n"
+            "top: jaw, lips split at the mouth opening so it opens, lids,\n"
+            "brows, cheeks, nose. Eyeballs go 100 % on the eye joints,\n"
+            "teeth on the teeth, tongue on the tongue, lashes on the lids,\n"
+            "brows copy the skin, hair on the head. Run it again any time.")
         self.btn_bind.clicked.connect(self._on_bind_face)
         root.addWidget(self.btn_bind)
 
@@ -255,6 +268,46 @@ class AdvancedFaceUI(QtWidgets.QDialog):
             b.clicked.connect(lambda _=False, n=nm: self._on_expression(n))
             eg.addWidget(b)
         root.addWidget(exp_box)
+
+        # The 52 face shape dials (ARKit names): keyframe them, or drive them
+        # live from a camera with Face Capture.
+        shp_box = QtWidgets.QGroupBox("Face Shapes (52 dials, for face capture)")
+        sg = QtWidgets.QVBoxLayout(shp_box)
+        srow = QtWidgets.QHBoxLayout()
+        self.btn_shapes = QtWidgets.QPushButton("Add / Rebuild Shape Dials")
+        self.btn_shapes.setToolTip(
+            "Adds C_faceShapes_CTRL with 52 dials (eyeBlinkLeft, jawOpen,\n"
+            "mouthSmileLeft, browInnerUp ... the names iPhone ARKit and\n"
+            "MediaPipe use). Each drives this face rig and adds on top of\n"
+            "your hand posing. Also adds lidFollow to the blink controls\n"
+            "(lids follow the eyes up and down). Run after Build.")
+        self.btn_shapes.clicked.connect(self._on_shapes_build)
+        srow.addWidget(self.btn_shapes, 2)
+        b_sel = QtWidgets.QPushButton("Select")
+        b_sel.setToolTip("Select C_faceShapes_CTRL (dials in the Channel Box).")
+        b_sel.clicked.connect(self._on_shapes_select)
+        srow.addWidget(b_sel, 1)
+        b_rm = QtWidgets.QPushButton("Remove")
+        b_rm.setToolTip("Take the shape dials off (the rig goes back to how "
+                        "it was).")
+        b_rm.clicked.connect(self._on_shapes_remove)
+        srow.addWidget(b_rm, 1)
+        sg.addLayout(srow)
+        vrow = QtWidgets.QHBoxLayout()
+        vrow.addWidget(QtWidgets.QLabel("Visemes:"))
+        for nm in face_shapes.VISEME_ORDER:
+            b = QtWidgets.QPushButton(nm)
+            b.setToolTip("Lip sync mouth shape '%s' from the shape dials.\n"
+                         "Shift+click also sets a key." % nm)
+            b.clicked.connect(lambda _=False, n=nm: self._on_viseme(n))
+            vrow.addWidget(b)
+        sg.addLayout(vrow)
+        b_cap = QtWidgets.QPushButton("Face Capture (webcam / phone)...")
+        b_cap.setToolTip("Drive these dials live from a camera and record "
+                         "them as keys.")
+        b_cap.clicked.connect(self._on_face_capture)
+        sg.addWidget(b_cap)
+        root.addWidget(shp_box)
 
         self.status = QtWidgets.QLabel("")
         self.status.setStyleSheet(
@@ -371,6 +424,19 @@ class AdvancedFaceUI(QtWidgets.QDialog):
         finally:
             cmds.undoInfo(closeChunk=True)
 
+    def _on_repair(self):
+        _reload(advanced_face)
+        cmds.undoInfo(openChunk=True)
+        try:
+            res = advanced_face.repair_face()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.status.setText(
+            "Repaired: %d lash joints now seal on a full blink%s." % (
+                res["sealed"], ", mouth corners fixed" if res["corners"]
+                else "") if res["sealed"] or res["corners"] else
+            "Nothing to repair: this face is up to date.")
+
     def _on_attach_head(self):
         head = self.head_field.text().strip()
         if not cmds.objExists("ADV_FACE_controls_GRP"):
@@ -387,25 +453,22 @@ class AdvancedFaceUI(QtWidgets.QDialog):
                 f"check it follows now.")
 
     def _on_bind_face(self):
-        _reload(advanced_face)
-        sel = [s for s in (cmds.ls(sl=True, transforms=True) or [])
-               if cmds.listRelatives(s, type="mesh", ni=True)]
-        if not sel:
-            self.status.setText(
-                "Select your face mesh in the viewport first, then Bind.")
-            return
+        import face_bind
+        _reload(face_bind)
         cmds.undoInfo(openChunk=True)
         try:
-            made = advanced_face.bind_face_mesh()
+            report = face_bind.smart_bind()
+        except RuntimeError as e:
+            self.status.setText(str(e))
+            return
         finally:
             cmds.undoInfo(closeChunk=True)
-        if made:
-            self.status.setText(
-                f"Bound {len(made)} mesh(es) to the face joints — set "
-                f"blink/zip to test, then paint weights.")
-        else:
-            self.status.setText(
-                "Bind failed — build the face first, then select the mesh.")
+        done = [k for k, v in report.items() if not v.startswith("skipped")]
+        self.status.setText(
+            "Bound %d mesh(es): %s. Try blink, jawOpen and a smile; the "
+            "Script Editor lists what each mesh got." % (
+                len(done), ", ".join(done[:6]) + ("..." if len(done) > 6
+                                                 else "")))
 
     def _on_bind_eyelids(self):
         _reload(advanced_face)
@@ -453,6 +516,61 @@ class AdvancedFaceUI(QtWidgets.QDialog):
             cmds.undoInfo(closeChunk=True)
         self.status.setText(f"Expression '{name}' applied ({n} dials). "
                             f"'Neutral' resets.")
+
+    def _on_shapes_build(self):
+        _reload(advanced_face)
+        _reload(face_shapes)
+        cmds.undoInfo(openChunk=True)
+        try:
+            res = face_shapes.build()
+        except RuntimeError as e:
+            self.status.setText(str(e))
+            return
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        missing = res["skipped"]
+        self.status.setText(
+            "%d of 52 shape dials on %s%s. Select it and turn a dial, or "
+            "open Face Capture." % (
+                len(res["wired"]), face_shapes.CTRL,
+                (" (hidden, no rig part: %s)" % ", ".join(missing[:6])
+                 + ("..." if len(missing) > 6 else "")) if missing else ""))
+
+    def _on_face_capture(self):
+        import face_capture
+        _reload(face_capture)
+        face_capture.show()
+
+    def _on_shapes_select(self):
+        if face_shapes.exists():
+            cmds.select(face_shapes.CTRL, r=True)
+            self.status.setText("Selected %s: the dials are in the Channel "
+                                "Box." % face_shapes.CTRL)
+        else:
+            self.status.setText("No shape dials yet: click Add first.")
+
+    def _on_shapes_remove(self):
+        _reload(face_shapes)
+        cmds.undoInfo(openChunk=True)
+        try:
+            n = face_shapes.remove()
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.status.setText("Shape dials removed." if n
+                            else "No shape dials to remove.")
+
+    def _on_viseme(self, name):
+        if not face_shapes.exists():
+            self.status.setText("Add the shape dials first.")
+            return
+        mods = QtWidgets.QApplication.keyboardModifiers()
+        key = bool(mods & QtCore.Qt.ShiftModifier)
+        cmds.undoInfo(openChunk=True)
+        try:
+            face_shapes.apply_viseme(name, key=key)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        self.status.setText("Viseme '%s'%s." % (name, " keyed" if key else ""))
 
     def _on_clear(self):
         self.face.delete()

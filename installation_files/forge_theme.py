@@ -34,6 +34,7 @@ SURFACE = "#24262d"      # raised: buttons, headers
 SUNKEN = "#16181c"      # inset: line edits, combos, spin boxes
 BORDER = "#32353e"      # dividers, outlines
 BORDER_DIM = "#2a2c33"      # disabled outlines
+OFF = "#6a6c74"      # outline of an unticked checkbox / radio button
 
 # --- text -------------------------------------------------------------------
 TEXT = "#e8e6e1"      # primary
@@ -88,11 +89,28 @@ QSpinBox:focus, QDoubleSpinBox:focus { border-color:%(a)s; }
 QSpinBox, QDoubleSpinBox { min-width:44px; padding-right:16px; }
 
 QCheckBox, QRadioButton { spacing:6px; }
-QCheckBox::indicator, QRadioButton::indicator { width:13px; height:13px; }
-QCheckBox::indicator:unchecked, QRadioButton::indicator:unchecked {
-    background:%(sunken)s; border:1px solid %(border)s; border-radius:3px; }
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {
-    background:%(a)s; border:1px solid %(a)s; border-radius:3px; }
+QCheckBox::indicator { width:12px; height:12px; border-radius:3px; }
+QCheckBox::indicator:unchecked {
+    background:%(sunken)s; border:1px solid %(off)s; }
+QCheckBox::indicator:checked {
+    background:%(a)s; border:1px solid %(a)s; image:url("%(check)s"); }
+QCheckBox::indicator:unchecked:hover { border-color:%(a)s; }
+QCheckBox::indicator:disabled { background:%(sunken)s;
+    border:1px solid %(border_dim)s; }
+
+/* Radio buttons are round with a dot, so they never read as checkboxes,
+   and the option that is off has dimmer text. */
+QRadioButton::indicator { width:10px; height:10px; border-radius:7px; }
+QRadioButton::indicator:unchecked {
+    background:%(sunken)s; border:2px solid %(off)s; }
+QRadioButton::indicator:checked { border:2px solid %(a)s;
+    background:qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+        stop:0 %(a)s, stop:0.55 %(a)s, stop:0.7 %(sunken)s,
+        stop:1 %(sunken)s); }
+QRadioButton::indicator:unchecked:hover { border-color:%(a)s; }
+QRadioButton:checked { color:%(text)s; }
+QRadioButton:unchecked { color:%(muted)s; }
+QRadioButton:unchecked:hover { color:%(text)s; }
 
 QSlider::groove:horizontal { height:4px; background:%(border)s;
                              border-radius:2px; }
@@ -113,13 +131,40 @@ QToolTip { background:%(sunken)s; color:%(text)s;
 """
 
 
+_CHECK_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" '
+    'viewBox="0 0 12 12"><path d="M2.4 6.3 L4.9 8.8 L9.6 3.4" fill="none" '
+    'stroke="%s" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round"/></svg>')
+
+
+def _check_image():
+    """Path of the tick drawn on a checked checkbox (written once to the
+    temp folder, since a stylesheet can only load an image from a file).
+    Empty if it can't be written: the box is then just filled."""
+    import os
+    import tempfile
+    try:
+        folder = os.path.join(tempfile.gettempdir(), "forge_theme")
+        path = os.path.join(folder, "check_%s.svg" % ON_ACCENT.lstrip("#"))
+        svg = _CHECK_SVG % ON_ACCENT
+        if not os.path.isfile(path):
+            if not os.path.isdir(folder):
+                os.makedirs(folder)
+            with open(path, "w") as f:
+                f.write(svg)
+        return path.replace("\\", "/")
+    except Exception:
+        return ""
+
+
 def style(accent=ACCENT_RIG):
     """The full stylesheet for a tool window, tinted by `accent`."""
     return _TEMPLATE % {
         "bg": BG, "surface": SURFACE, "sunken": SUNKEN,
-        "border": BORDER, "border_dim": BORDER_DIM,
+        "border": BORDER, "border_dim": BORDER_DIM, "off": OFF,
         "text": TEXT, "muted": MUTED, "disabled": DISABLED,
-        "on_accent": ON_ACCENT, "a": accent,
+        "on_accent": ON_ACCENT, "a": accent, "check": _check_image(),
     }
 
 

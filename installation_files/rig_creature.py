@@ -109,7 +109,10 @@ PRESETS = {
         "about": "Four legs and wings. RE-POSES the body guides: body "
                  "horizontal (facing +Z), the biped arms become the wings "
                  "with the fingers as long wing spars, the legs become the "
-                 "hind legs, and a frontLeg pair is added on the chest. Keep "
+                 "hind legs, a frontLeg pair is added on the chest, and the "
+                 "neck becomes a 5-joint IK neck: drag C_headIK_CTRL and the "
+                 "whole neck follows (C_neck_SETTINGS_CTRL.ikFkSwitch swaps "
+                 "it for the FK chain). Keep "
                  "Arms + Fingers + Tail on. Set walkArmSwing to 0 on the "
                  "global control before using auto-walk.",
         # Left-side / centre biped guide positions (right side mirrors).
@@ -117,8 +120,10 @@ PRESETS = {
             "C_root": (0, 100, -10), "C_pelvis": (0, 100, -40),
             "C_spine_01": (0, 102, -20), "C_spine_02": (0, 104, 0),
             "C_spine_03": (0, 104, 20), "C_chest": (0, 102, 40),
-            "C_neck": (0, 115, 60), "C_head": (0, 135, 85),
-            "C_headTip": (0, 135, 110),
+            "C_neck": (0, 115, 60), "C_neck_02": (0, 122, 67),
+            "C_neck_03": (0, 128, 73), "C_neck_04": (0, 132, 79),
+            "C_neck_05": (0, 134, 84), "C_head": (0, 135, 90),
+            "C_headTip": (0, 135, 115),
             "L_hip": (14, 95, -40), "L_knee": (16, 60, -25),
             "L_ankle": (16, 20, -45), "L_ball": (16, 3, -35),
             "L_toe": (16, 3, -25), "L_toeTip": (16, 3, -20),
@@ -129,6 +134,8 @@ PRESETS = {
             "C_tail_05": (0, 83, -125), "C_tail_06": (0, 80, -140),
             "C_tail_07": (0, 77, -155), "C_tailTip": (0, 75, -170),
         },
+        # A dragon's neck: 5 joints on an IK spline, with a head control.
+        "neck": {"segments": 5, "ik": True},
         # Wing membrane spars: the finger guides fan back from the wrist.
         "wing_spars": {"wrist": "L_wrist", "length": 90, "thumb_length": 60,
                        "fan_start": 10, "fan_step": 22, "drop": 10},
@@ -541,6 +548,12 @@ def add_preset(name):
         if not gs.exists():
             gs.build()
         gs._refresh_handles()
+        neck = preset.get("neck") or {}
+        if neck:
+            # Make the neck's joints first: their guides are placed below.
+            gs.set_neck_segments(neck.get("segments", 1))
+            gs.set_neck_ik(neck.get("ik", False))
+            gs._refresh_handles()
         targets = _preset_guide_targets(preset)
         gs._set_world_positions({gs.guides[g]: p for g, p in targets.items()
                                  if g in gs.guides})

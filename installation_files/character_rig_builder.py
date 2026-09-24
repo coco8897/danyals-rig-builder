@@ -1079,10 +1079,27 @@ class SpineRig(object):
 # =============================================================================
 
 class NeckHeadRig(object):
+    """Neck and head.
+
+    One neck joint by default: exactly the classic biped. `positions` may
+    carry neck_02 ... neck_NN for a longer neck (a dragon, a horse, a
+    swan), and `ik=True` then runs an IK spline through it with a head IK
+    control, switchable on C_neck_SETTINGS_CTRL.ikFkSwitch (0 = IK,
+    1 = FK, the same convention as the arms and legs).
+
+    The names never change: C_neck_BIND_JNT, C_neck_02_BIND_JNT ...,
+    C_head_BIND_JNT, C_head_tip_BIND_JNT, and the controls C_neck_CTRL,
+    C_neck_02_CTRL ..., C_head_CTRL. So the face, picker, pose library,
+    face capture and game export keep working whatever the neck is.
+
+    In IK mode the neck bends to reach C_headIK_CTRL while C_head_CTRL
+    still rotates the head on top, and the head control rides the neck's
+    tip either way.
+    """
 
     def __init__(self, positions=None,
                  parent_ctrl=None, parent_jnt=None,
-                 ctrl_grp=None, jnt_grp=None):
+                 ctrl_grp=None, jnt_grp=None, misc_grp=None, ik=False):
         self.positions = positions or {
             "neck":     (0, 148.0, 0),
             "head":     (0, 158.0, 0),
@@ -1092,44 +1109,269 @@ class NeckHeadRig(object):
         self.parent_jnt = parent_jnt    # chest_bind_jnt
         self.ctrl_grp = ctrl_grp
         self.jnt_grp = jnt_grp
-        self.bind_jnts = []
-        self.fk_ctrls = []
+        self.misc_grp = misc_grp
+        # neck, neck_02 ... neck_NN in order (just "neck" on a biped).
+        extra = sorted(k for k in self.positions
+                       if k.startswith("neck_") and k[5:].isdigit())
+        self.neck_slots = ["neck"] + extra
+        # An IK spline needs a neck with segments to bend.
+        self.ik = bool(ik) and len(self.neck_slots) >= 2
+
+        # Outputs
+        self.bind_jnts = []          # neck ... head, head_tip
+        self.fk_ctrls = []           # neck ctrls + the head ctrl (last)
+        self.neck_jnts = []          # the neck BIND joints only
+        self.fk_jnts = []            # IK mode: hidden FK driver chain
+        self.ik_jnts = []            # IK mode: hidden IK driver chain
+        self.cluster_ctrls = []
+        self.settings_ctrl = None
+        self.head_ik_ctrl = None
+        self.head_jnt = None
+        self.head_ctrl = None
+        self.head_follow = None
+        self.curve = None
+        self.ik_handle = None
 
     def build(self):
-        # Bind joints (3: neck, head, head_tip)
+        self._build_joints()
+        if self.ik:
+            self._build_driver_chains()
+        self._build_fk_ctrls()
+        if self.ik:
+            self._build_ik_spline()
+            self._build_settings_ctrl()
+            self._build_ikfk_blend()
+            self._build_stretch()
+            self._build_visibility_sdk()
+            cmds.setAttr(f"{self.fk_jnts[0]}.v", 0)
+            cmds.setAttr(f"{self.ik_jnts[0]}.v", 0)
+
+    # -----------------------------------------------------------------------
+
+    def _slots(self):
+        return self.neck_slots + ["head", "head_tip"]
+
+    def _build_joints(self):
         cmds.select(cl=True)
-        for part in ("neck", "head", "head_tip"):
+        for part in self._slots():
             j = cmds.joint(n=f"C_{part}_BIND_JNT", p=self.positions[part])
             self.bind_jnts.append(j)
         cmds.joint(self.bind_jnts[0], e=True, oj="xyz", sao="yup",
                    ch=True, zso=True)
         cmds.setAttr(f"{self.bind_jnts[-1]}.jointOrient", 0, 0, 0)
         cmds.parent(self.bind_jnts[0], self.parent_jnt)
+        self.neck_jnts = self.bind_jnts[:len(self.neck_slots)]
+        self.head_jnt = self.bind_jnts[len(self.neck_slots)]
 
-        # FK ctrls for neck and head.
-        # Use POSITION-ONLY matchTransform so the ctrls have identity world
-        # rotation. This is critical: any face sub-ctrls (lids/lips/etc) that
-        # parent under head_CTRL will inherit its world rotation. If head_CTRL
-        # has the chain's X-up orient baked into rotation, face SDK that moves
-        # things in local-Y ends up moving them in a tilted/wrong axis,
-        # collapsing X to zero. The parentConstraint with mo=True absorbs
-        # the offset cleanly so animator rotation still drives the joint.
-        # The circle normal=(0,1,0) gives a horizontal halo around the head.
-        for i, part in enumerate(("neck", "head")):
+    def _build_driver_chains(self):
+        """Hidden FK and IK chains over the neck (plus the head joint, so
+        the neck's last joint aims the same way the BIND one does and the
+        IK spline can end at the head)."""
+        for suffix, out in (("FK", self.fk_jnts), ("IK", self.ik_jnts)):
+            cmds.select(cl=True)
+            for bind in self.neck_jnts + [self.head_jnt]:
+                pos = cmds.xform(bind, q=True, ws=True, t=True)
+                out.append(cmds.joint(
+                    n=bind.replace("_BIND_", f"_{suffix}_"), p=pos))
+            cmds.joint(out[0], e=True, oj="xyz", sao="yup", ch=True,
+                       zso=True)
+            cmds.setAttr(f"{out[-1]}.jointOrient", 0, 0, 0)
+            cmds.parent(out[0], self.parent_jnt)
+
+    def _build_fk_ctrls(self):
+        """A circle per neck joint, then the head control.
+
+        Position-only matchTransform so the controls have identity world
+        rotation: face sub-controls parent under C_head_CTRL, and a
+        rotated head control would tilt their SDK axes.
+        """
+        prev = self.parent_ctrl
+        for i, part in enumerate(self.neck_slots + ["head"]):
             ctrl = create_circle_ctrl(
                 f"C_{part}_CTRL", radius=1.2 * SCALE,
                 normal=(0, 1, 0), color=COLOR_CENTER,
             )
             cmds.matchTransform(ctrl, self.bind_jnts[i], pos=True, rot=False)
             offset = make_offset_group(ctrl)
-            if i == 0:
-                cmds.parent(offset, self.parent_ctrl)
+            cmds.parent(offset, prev)
+            if part == "head":
+                cmds.parentConstraint(ctrl, self.head_jnt, mo=True)
+                self.head_ctrl = ctrl
+            elif self.ik:
+                # The neck BIND joints follow the IK / FK blend instead.
+                cmds.parentConstraint(ctrl, self.fk_jnts[i], mo=True)
             else:
-                cmds.parent(offset, self.fk_ctrls[-1])
-            cmds.parentConstraint(ctrl, self.bind_jnts[i], mo=True)
+                cmds.parentConstraint(ctrl, self.bind_jnts[i], mo=True)
             lock_hide_attrs(ctrl, ["tx", "ty", "tz",
                                    "sx", "sy", "sz", "v"])
             self.fk_ctrls.append(ctrl)
+            prev = ctrl
+        if self.ik:
+            # The head control rides the end of whichever chain is driving
+            # (IK or FK), so it follows the neck in both modes, stretch
+            # included. Wired up in _build_ikfk_blend.
+            self.head_follow = cmds.group(em=True, n="C_head_follow_GRP")
+            cmds.matchTransform(self.head_follow, self.head_jnt)
+            cmds.parent(self.head_follow, self.parent_ctrl)
+            head_offset = cmds.listRelatives(self.head_ctrl, p=True)[0]
+            cmds.parent(head_offset, self.head_follow)
+
+    def _build_ik_spline(self):
+        """A curve through the neck (and the head) driven by three cluster
+        controls: the base on the chest, a middle one, and C_headIK_CTRL
+        at the head, which the neck reaches for."""
+        pts = [self.positions[s] for s in self.neck_slots] \
+            + [self.positions["head"]]
+        self.curve = cmds.curve(ep=pts, d=min(3, max(1, len(pts) - 1)),
+                                n="C_neck_CRV")
+        cmds.parent(self.curve, self.misc_grp or self.ctrl_grp)
+        cmds.setAttr(f"{self.curve}.inheritsTransform", 0)
+        cmds.setAttr(f"{self.curve}.v", 0)
+        self.ik_handle = cmds.ikHandle(
+            sj=self.ik_jnts[0], ee=self.ik_jnts[-1],
+            sol="ikSplineSolver", curve=self.curve,
+            createCurve=False, parentCurve=False, n="C_neck_ikHandle")[0]
+        cmds.setAttr(f"{self.ik_handle}.v", 0)
+        cmds.parent(self.ik_handle, self.misc_grp or self.ctrl_grp)
+
+        n_cvs = cmds.getAttr(f"{self.curve}.spans") \
+            + cmds.getAttr(f"{self.curve}.degree")
+        third = max(1, n_cvs // 3)
+        groups = [("root", list(range(0, third)), self.positions["neck"]),
+                  ("mid", list(range(third, n_cvs - third)),
+                   self.positions[self.neck_slots[len(self.neck_slots) // 2]]),
+                  ("head", list(range(n_cvs - third, n_cvs)),
+                   self.positions["head"])]
+        mid_offset = None
+        for label, cvs, at in groups:
+            if not cvs:
+                continue
+            _clus, handle = cmds.cluster(
+                [f"{self.curve}.cv[{i}]" for i in cvs],
+                n=f"C_neck_{label}_CLUS")
+            cmds.hide(handle)
+            cmds.parent(handle, self.misc_grp or self.ctrl_grp)
+            name = ("C_headIK_CTRL" if label == "head"
+                    else f"C_neck_{label}_IK_CTRL")
+            ctrl = create_diamond_ctrl(name, size=0.9 * SCALE, color=COLOR_IK)
+            cmds.xform(ctrl, ws=True, t=at)
+            offset = make_offset_group(ctrl)
+            # The neck's IK rides the body: move the chest and the head
+            # control comes along, so only real head moves need keying.
+            cmds.parent(offset, self.parent_ctrl)
+            cmds.parentConstraint(ctrl, handle, mo=True)
+            lock_hide_attrs(ctrl, ["sx", "sy", "sz", "v"])
+            self.cluster_ctrls.append(ctrl)
+            if label == "head":
+                self.head_ik_ctrl = ctrl
+            elif label == "mid":
+                mid_offset = offset
+        # The middle of the spline follows the head control half way, so
+        # moving the head arcs the whole neck instead of kinking its tip.
+        # The animator can still offset the middle control on top.
+        if self.head_ik_ctrl and mid_offset:
+            pc = cmds.pointConstraint(self.cluster_ctrls[0],
+                                      self.head_ik_ctrl, mid_offset,
+                                      mo=True)[0]
+            for w in cmds.pointConstraint(pc, q=True, wal=True):
+                cmds.setAttr(f"{pc}.{w}", 0.5)
+
+    def _build_settings_ctrl(self):
+        self.settings_ctrl = create_gear_ctrl(
+            "C_neck_SETTINGS_CTRL", size=0.5 * SCALE, color=COLOR_SETTINGS)
+        cmds.matchTransform(self.settings_ctrl, self.neck_jnts[0])
+        cmds.move(2.5 * SCALE, 0, 0, self.settings_ctrl, r=True, ws=True)
+        offset = make_offset_group(self.settings_ctrl)
+        cmds.parent(offset, self.ctrl_grp)
+        cmds.parentConstraint(self.neck_jnts[0], offset, mo=True)
+        cmds.addAttr(self.settings_ctrl, ln="ikFkSwitch", at="double",
+                     min=0, max=1, dv=0, k=True)
+        # Let the neck stretch so the head reaches an IK control pulled
+        # past its length (0 = a fixed-length neck, like an arm).
+        cmds.addAttr(self.settings_ctrl, ln="stretch", at="double",
+                     min=0, max=1, dv=0, k=True)
+        lock_hide_attrs(self.settings_ctrl,
+                        ["tx", "ty", "tz", "rx", "ry", "rz",
+                         "sx", "sy", "sz", "v"])
+
+    def _build_stretch(self):
+        """Stretch the IK neck along the spline: each joint scales by how
+        much longer the curve is than at rest, faded in by `stretch`."""
+        info = cmds.createNode("curveInfo", n="C_neck_length_INFO")
+        cmds.connectAttr(f"{self.curve}.worldSpace[0]", f"{info}.inputCurve")
+        rest = cmds.getAttr(f"{info}.arcLength")
+        if rest <= 1e-6:
+            return
+        # ratio = length / rest, undone by the rig's own scale.
+        ratio = cmds.createNode("multiplyDivide", n="C_neck_stretchRatio_MD")
+        cmds.setAttr(f"{ratio}.operation", 2)
+        cmds.connectAttr(f"{info}.arcLength", f"{ratio}.input1X")
+        cmds.setAttr(f"{ratio}.input2X", rest)
+        # 1 + (ratio - 1) * stretch
+        less = cmds.createNode("plusMinusAverage", n="C_neck_stretchOff_PMA")
+        cmds.setAttr(f"{less}.operation", 2)
+        cmds.connectAttr(f"{ratio}.outputX", f"{less}.input1D[0]")
+        cmds.setAttr(f"{less}.input1D[1]", 1.0)
+        gate = cmds.createNode("multDoubleLinear", n="C_neck_stretchAmt_MDL")
+        cmds.connectAttr(f"{less}.output1D", f"{gate}.input1")
+        cmds.connectAttr(f"{self.settings_ctrl}.stretch", f"{gate}.input2")
+        total = cmds.createNode("addDoubleLinear", n="C_neck_stretch_ADL")
+        cmds.connectAttr(f"{gate}.output", f"{total}.input1")
+        cmds.setAttr(f"{total}.input2", 1.0)
+        for jnt in self.ik_jnts[:-1]:
+            cmds.connectAttr(f"{total}.output", f"{jnt}.scaleX", f=True)
+        # The BIND neck follows the IK chain's length as well as its turn.
+        for i, bind in enumerate(self.neck_jnts):
+            if i == 0:
+                continue
+            pc = cmds.pointConstraint(self.fk_jnts[i], self.ik_jnts[i],
+                                      bind, mo=True)[0]
+            weights = cmds.pointConstraint(pc, q=True, wal=True)
+            rev = "C_neck_ikfk_REV"
+            cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch",
+                             f"{pc}.{weights[0]}")
+            if not cmds.objExists(rev):
+                rev = cmds.createNode("reverse", n=rev)
+                cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch",
+                                 f"{rev}.inputX")
+            cmds.connectAttr(f"{rev}.outputX", f"{pc}.{weights[1]}")
+
+    def _build_ikfk_blend(self):
+        """The neck BIND joints blend between the FK and IK chains, the
+        same orientConstraint pattern as the arms and legs."""
+        rev = cmds.createNode("reverse", n="C_neck_ikfk_REV")
+        cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch", f"{rev}.inputX")
+        for i, bind in enumerate(self.neck_jnts):
+            oc = cmds.orientConstraint(self.fk_jnts[i], self.ik_jnts[i],
+                                       bind, mo=True)[0]
+            cmds.setAttr(f"{oc}.interpType", 2)          # shortest path
+            weights = cmds.orientConstraint(oc, q=True, wal=True)
+            cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch",
+                             f"{oc}.{weights[0]}")
+            cmds.connectAttr(f"{rev}.outputX", f"{oc}.{weights[1]}")
+        # The head control's group sits on the driving chain's head.
+        for kind in (cmds.pointConstraint, cmds.orientConstraint):
+            con = kind(self.fk_jnts[-1], self.ik_jnts[-1], self.head_follow,
+                       mo=True)[0]
+            weights = kind(con, q=True, wal=True)
+            cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch",
+                             f"{con}.{weights[0]}")
+            cmds.connectAttr(f"{rev}.outputX", f"{con}.{weights[1]}")
+
+    def _build_visibility_sdk(self):
+        """Neck FK controls show at switch 1, the IK ones at 0. The head
+        control stays visible in both."""
+        driver = f"{self.settings_ctrl}.ikFkSwitch"
+        for ctrl in self.cluster_ctrls:
+            cmds.setAttr(f"{ctrl}.v", l=False)
+            for dv, v in ((0.0, 1), (0.999, 1), (1.0, 0)):
+                cmds.setDrivenKeyframe(f"{ctrl}.v", cd=driver, dv=dv, v=v,
+                                       itt="linear", ott="step")
+        for ctrl in self.fk_ctrls[:len(self.neck_slots)]:
+            cmds.setAttr(f"{ctrl}.v", l=False)
+            for dv, v in ((0.0, 0), (0.001, 1), (1.0, 1)):
+                cmds.setDrivenKeyframe(f"{ctrl}.v", cd=driver, dv=dv, v=v,
+                                       itt="linear", ott="step")
 
 
 # =============================================================================
@@ -1956,6 +2198,38 @@ class LegRig(object):
         lock_hide_attrs(self.pv_ctrl, ["rx", "ry", "rz",
                                        "sx", "sy", "sz", "v"])
 
+    def _foot_pivot_positions(self):
+        """World (heel, toeTip) reverse-foot pivots, taken from the foot joints.
+
+        Both sit on the sole: the floor (y = 0) for a foot standing on it, or
+        the lowest foot joint's height for a foot built up in the air. The
+        heel is behind the ankle along the foot's heading by a fifth of the
+        ankle -> toe-tip length (5 on the default 25-long foot); the toe tip
+        is under the toeTip joint, or just past the toe when the positions
+        dict has no toeTip.
+        """
+        ankle = self.positions["ankle"]
+        ball = self.positions["ball"]
+        toe = self.positions["toe"]
+        tip = self.positions.get("toeTip")
+        front = tip if tip is not None else toe
+
+        low = min(p[1] for p in (ball, toe, front))
+        ground = 0.0 if abs(low) <= ankle[1] - low else low
+
+        dx, dz = front[0] - ankle[0], front[2] - ankle[2]
+        length = math.hypot(dx, dz)
+        hx, hz = (dx / length, dz / length) if length > 1e-6 else (0.0, 1.0)
+
+        heel_back = 0.2 * length
+        heel = (ankle[0] - hx * heel_back, ground, ankle[2] - hz * heel_back)
+        if tip is not None:
+            toetip = (tip[0], ground, tip[2])
+        else:
+            pad = 0.15 * length
+            toetip = (toe[0] + hx * pad, ground, toe[2] + hz * pad)
+        return heel, toetip
+
     def _create_reverse_foot(self):
         """
         Locator hierarchy under IK ctrl:
@@ -1969,8 +2243,7 @@ class LegRig(object):
         ankle_pos = self.positions["ankle"]
         ball_pos  = self.positions["ball"]
         toe_pos   = self.positions["toe"]
-        heel_pos  = (ankle_pos[0], 0.0, ankle_pos[2] - 5.0 * SCALE)
-        toetip_pos = (toe_pos[0], 0.0, toe_pos[2] + 3.0 * SCALE)
+        heel_pos, toetip_pos = self._foot_pivot_positions()
 
         # Make locators
         def mk_loc(name, pos):
@@ -2128,15 +2401,21 @@ class LegRig(object):
         cmds.setAttr(f"{toe_clamp}.maxR", 9999.0)
 
         # ----- replace direct connections with PMA-summed versions -----
-        # heel:   heelRoll attr + heel-from-roll  →  heel_LOC.rotateX
+        # heel:  -(heelRoll attr + heel-from-roll)  →  heel_LOC.rotateX
+        # Negated: the heel is the one pivot with the whole foot IN FRONT of
+        # it, and +rotateX swings +Z points down — so a positive heel roll
+        # must rotate -X for the toes to rise instead of sinking into the
+        # floor. (ball/toeTip pivot with the heel behind them: +X lifts it.)
         cmds.disconnectAttr(f"{self.ik_ctrl}.heelRoll",
                             f"{heel}.rotateX")
         heel_sum = cmds.createNode("plusMinusAverage",
                                     n=f"{self.prefix}_heelSum_PMA")
+        cmds.setAttr(f"{heel_sum}.operation", 2)  # 0 - heelRoll - fromRoll
+        cmds.setAttr(f"{heel_sum}.input1D[0]", 0.0)
         cmds.connectAttr(f"{self.ik_ctrl}.heelRoll",
-                         f"{heel_sum}.input1D[0]")
-        cmds.connectAttr(f"{heel_clamp}.outputR",
                          f"{heel_sum}.input1D[1]")
+        cmds.connectAttr(f"{heel_clamp}.outputR",
+                         f"{heel_sum}.input1D[2]")
         cmds.connectAttr(f"{heel_sum}.output1D", f"{heel}.rotateX")
 
         # ball:   ballRoll attr + ball-from-roll  →  ball_LOC.rotateX
@@ -4143,7 +4422,8 @@ class CharacterRig(object):
                 positions=self.neck_positions,
                 parent_ctrl=torso_ctrl,
                 parent_jnt=torso_jnt,
-                ctrl_grp=cg, jnt_grp=jg,
+                ctrl_grp=cg, jnt_grp=jg, misc_grp=mg,
+                ik=bool((self.neck_positions or {}).get("ik")),
             )
             self.neck.build()
 
@@ -4213,8 +4493,8 @@ class CharacterRig(object):
 
         # 7. Face (parents to head joint + head ctrl)
         if "face" in self.modules and self.neck:
-            head_jnt  = self.neck.bind_jnts[1]   # C_head_BIND_JNT
-            head_ctrl = self.neck.fk_ctrls[1]    # C_head_CTRL
+            head_jnt  = self.neck.head_jnt       # C_head_BIND_JNT
+            head_ctrl = self.neck.head_ctrl      # C_head_CTRL
             self.face = FaceRig(
                 positions=self.face_positions,
                 parent_ctrl=head_ctrl,
@@ -4235,7 +4515,7 @@ class CharacterRig(object):
                 "chest":  (torso_ctrl, torso_jnt),
                 "pelvis": (pelvis_ctrl, pelvis_jnt),
                 "cog":    (self.core.cog_ctrl, self.core.root_bind_jnt),
-                "head":   ((neck.fk_ctrls[1], neck.bind_jnts[1]) if neck
+                "head":   ((neck.head_ctrl, neck.head_jnt) if neck
                            else (torso_ctrl, torso_jnt)),
             })
 

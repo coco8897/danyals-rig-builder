@@ -11,9 +11,10 @@ from character_rig_builder.py and adds bird-specific limbs and a fanned tail:
                   pole vector, stretchy IK, AND fanned primary + secondary
                   feather rows per wing driven by a wingSpread macro attr.
   * BirdLegRig  — avian leg: femur / tibiotarsus / tarsometatarsus IK chain
-                  (the visible "knee" is the ankle on a real bird), reverse-
-                  foot ankle roll, four toes (three forward + one hallux at
-                  the back) each with a talon tip + per-toe / global curl SDK.
+                  (the visible "knee" is the ankle on a real bird), stretchy,
+                  reverse foot that stands on the toes, four toes (three
+                  forward + one hallux at the back) each with a talon tip +
+                  per-toe / global curl SDK.
   * TailFanRig  — small tail base + N fanned tail-feather joints, driven by
                   a tailSpread macro attribute on the tail-base settings ctrl.
 
@@ -38,6 +39,7 @@ from character_rig_builder import (
     COLOR_LEFT, COLOR_RIGHT, COLOR_CENTER, COLOR_IK, COLOR_PV,
     COLOR_BEND, COLOR_SETTINGS,
     make_offset_group, lock_hide_attrs, get_pole_vector_position,
+    add_fk_length, make_stretch_anchor,
     create_circle_ctrl, create_diamond_ctrl, create_cube_ctrl,
     create_square_ctrl, create_gear_ctrl, create_foot_ctrl,
     CoreRig, SpineRig, NeckHeadRig, FaceRig,
@@ -110,7 +112,7 @@ class BirdWingRig(object):
 
         # Outputs
         # bind_jnts: [shoulder, elbow, wrist, wingTip]  — wingTip is the leaf
-        # fk_jnts / ik_jnts: parallel chains of length 3 (no wingTip clone)
+        # fk_jnts / ik_jnts: parallel chains incl. the wingTip leaf
         self.bind_jnts = []
         self.fk_jnts   = []
         self.ik_jnts   = []
@@ -153,11 +155,12 @@ class BirdWingRig(object):
         cmds.setAttr(f"{self.bind_jnts[-1]}.jointOrient", 0, 0, 0)
         cmds.parent(self.bind_jnts[0], self.parent_jnt)
 
-        # FK and IK chains — only the first three joints (no wingTip clone).
-        # The wingTip rides on the wrist BIND joint's child transform, so no
-        # parallel needed; IK solves shoulder → wrist.
-        self.fk_jnts = self._duplicate_chain(self.bind_jnts[:3], "FK")
-        self.ik_jnts = self._duplicate_chain(self.bind_jnts[:3], "IK")
+        # FK and IK clones include the wingTip, so their wrists aim down the
+        # hand exactly like the BIND wrist (a 3-joint clone zeroes the wrist
+        # orient, and IK/FK match then turned the hand by that offset). IK
+        # still solves shoulder → wrist; the wingTip rides the wrist.
+        self.fk_jnts = self._duplicate_chain(self.bind_jnts, "FK")
+        self.ik_jnts = self._duplicate_chain(self.bind_jnts, "IK")
 
     def _duplicate_chain(self, source, suffix):
         new_chain = []
@@ -179,7 +182,7 @@ class BirdWingRig(object):
     # -----------------------------------------------------------------------
 
     def _create_fk(self):
-        for i, jnt in enumerate(self.fk_jnts):
+        for i, jnt in enumerate(self.fk_jnts[:3]):
             ctrl = create_circle_ctrl(
                 jnt.replace("_JNT", "_CTRL"), radius=1.0 * SCALE,
                 normal=(1, 0, 0), color=self.color,
@@ -195,6 +198,11 @@ class BirdWingRig(object):
                                    "sx", "sy", "sz", "v"])
             self.fk_ctrls.append(ctrl)
             self.fk_offsets.append(offset)
+        # Upper / lower wing length, so FK can hold what stretchy IK does
+        # (IK/FK match on a stretched wing).
+        for i, part in ((1, "shoulder"), (2, "elbow")):
+            add_fk_length(self.fk_ctrls[i - 1], self.fk_offsets[i],
+                          f"{self.prefix}_{part}_fkLength_MD")
 
     # -----------------------------------------------------------------------
     # IK
@@ -202,7 +210,7 @@ class BirdWingRig(object):
 
     def _create_ik(self):
         self.ik_handle = cmds.ikHandle(
-            sj=self.ik_jnts[0], ee=self.ik_jnts[-1],
+            sj=self.ik_jnts[0], ee=self.ik_jnts[2],
             sol="ikRPsolver", n=f"{self.prefix}_ikHandle",
         )[0]
         cmds.setAttr(f"{self.ik_handle}.v", 0)
@@ -210,11 +218,13 @@ class BirdWingRig(object):
         self.ik_ctrl = create_cube_ctrl(
             f"{self.prefix}_IK_CTRL", size=1.5 * SCALE, color=COLOR_IK,
         )
-        cmds.matchTransform(self.ik_ctrl, self.ik_jnts[-1])
+        cmds.matchTransform(self.ik_ctrl, self.ik_jnts[2])
         self.ik_offset = make_offset_group(self.ik_ctrl)
-        cmds.parent(self.ik_offset, self.ctrl_grp)
+        # The wing rides the chest: moving the COG or chest carries both
+        # wings (in world space they were left hanging in the air).
+        cmds.parent(self.ik_offset, self.parent_ctrl)
         cmds.parent(self.ik_handle, self.ik_ctrl)
-        cmds.orientConstraint(self.ik_ctrl, self.ik_jnts[-1], mo=True)
+        cmds.orientConstraint(self.ik_ctrl, self.ik_jnts[2], mo=True)
 
         pv_pos = get_pole_vector_position(self.ik_jnts[0],
                                            self.ik_jnts[1],
@@ -225,7 +235,7 @@ class BirdWingRig(object):
         )
         cmds.xform(self.pv_ctrl, ws=True, t=pv_pos)
         self.pv_offset = make_offset_group(self.pv_ctrl)
-        cmds.parent(self.pv_offset, self.ctrl_grp)
+        cmds.parent(self.pv_offset, self.parent_ctrl)
         cmds.poleVectorConstraint(self.pv_ctrl, self.ik_handle)
 
         lock_hide_attrs(self.ik_ctrl, ["sx", "sy", "sz", "v"])
@@ -279,14 +289,19 @@ class BirdWingRig(object):
         elbow_t = cmds.getAttr(f"{self.ik_jnts[1]}.translateX")
         wrist_t = cmds.getAttr(f"{self.ik_jnts[2]}.translateX")
 
-        parent_pos = cmds.xform(self.parent_jnt, q=True, ws=True, t=True)
-        ctrl_pos   = cmds.xform(self.ik_ctrl,    q=True, ws=True, t=True)
+        # Measure from the shoulder, not the chest joint the wing hangs
+        # off: chest -> wrist grows by a different ratio than shoulder ->
+        # wrist, so the wrist missed its ctrl (see make_stretch_anchor).
+        anchor = make_stretch_anchor(self.ik_jnts[0], self.parent_jnt,
+                                     f"{self.prefix}_stretch_ANCHOR")
+        anchor_pos = cmds.xform(anchor,       q=True, ws=True, t=True)
+        ctrl_pos   = cmds.xform(self.ik_ctrl, q=True, ws=True, t=True)
         rest_length = math.sqrt(sum((p - c) ** 2
-                                     for p, c in zip(parent_pos, ctrl_pos)))
+                                     for p, c in zip(anchor_pos, ctrl_pos)))
 
         dist = cmds.createNode("distanceBetween",
                                 n=f"{self.prefix}_stretch_DIST")
-        cmds.connectAttr(f"{self.parent_jnt}.worldMatrix[0]",
+        cmds.connectAttr(f"{anchor}.worldMatrix[0]",
                           f"{dist}.inMatrix1")
         cmds.connectAttr(f"{self.ik_ctrl}.worldMatrix[0]",
                           f"{dist}.inMatrix2")
@@ -418,7 +433,6 @@ class BirdWingRig(object):
             start_jnt=self.bind_jnts[2],   # wrist
             end_jnt=self.bind_jnts[3],     # wingTip
             parent_jnt=self.bind_jnts[2],  # wrist  (follows IK/FK blend)
-            parent_ctrl=self.fk_ctrls[2],  # wrist FK ctrl  (animator-visible parent)
             min_angle=self.PRIMARY_MIN_SPREAD,
             max_angle=self.PRIMARY_MAX_SPREAD,
             row_attr="primarySpread",
@@ -430,15 +444,13 @@ class BirdWingRig(object):
             start_jnt=self.bind_jnts[1],   # elbow
             end_jnt=self.bind_jnts[2],     # wrist
             parent_jnt=self.bind_jnts[1],  # elbow
-            parent_ctrl=self.fk_ctrls[1],  # elbow FK ctrl
             min_angle=self.SECONDARY_MIN_SPREAD,
             max_angle=self.SECONDARY_MAX_SPREAD,
             row_attr="secondarySpread",
         )
 
     def _build_feather_row(self, row_name, count, start_jnt, end_jnt,
-                            parent_jnt, parent_ctrl,
-                            min_angle, max_angle, row_attr):
+                            parent_jnt, min_angle, max_angle, row_attr):
         """Build one row of N feathers along the segment start_jnt → end_jnt.
 
         Returns a list of dict(jnt=..., ctrl=..., auto=...).
@@ -449,12 +461,14 @@ class BirdWingRig(object):
         # Direction along the bone (used to space feathers).
         bone_vec = tuple(e - s for s, e in zip(start_pos, end_pos))
 
-        # Feather visibility container — parented to the parent BIND joint
-        # so all the feather ctrls stay in one outliner group per row.
+        # One group per row that follows the wing BIND joint, so the
+        # feather ctrls ride the wing in IK and FK. (Under the FK ctrls they
+        # stayed behind in IK mode and were hidden with the FK ctrls.)
         row_grp = cmds.group(em=True,
                               n=f"{self.prefix}_{row_name}_feathers_GRP")
-        cmds.matchTransform(row_grp, parent_ctrl)
-        cmds.parent(row_grp, parent_ctrl)
+        cmds.matchTransform(row_grp, parent_jnt)
+        cmds.parent(row_grp, self.ctrl_grp)
+        cmds.parentConstraint(parent_jnt, row_grp, mo=True)
 
         # Drive feather row visibility from settings_ctrl.featherVis.
         cmds.connectAttr(f"{self.settings_ctrl}.featherVis",
@@ -538,17 +552,19 @@ class BirdLegRig(object):
         → foot (ball of the foot, where the toes meet)
         → footTip (leaf bone in front of the foot — toes pivot from here)
 
-    The IK chain is the first 3 joints (femur → tibiotarsus → tarsometatarsus).
-    The ankle joint (between tarsometatarsus and foot) drives the foot roll
-    via a reverse-foot setup similar to the biped LegRig.
+    The RP IK runs femur → tibiotarsus → tarsometatarsus; two SC handles on
+    the IK chain carry on to the foot and the foot tip, under a reverse
+    foot (see _create_reverse_foot). All five BIND joints blend between the
+    FK and IK chains, so FK mode is pure FK (the foot has its own FK ctrl).
 
     Toes (4 per foot, standard avian):
         digit2, digit3, digit4 — three forward-facing toes
         hallux                  — single backward-facing toe
 
-    Each toe is a 2-segment FK chain (proximal + distal) + a talon tip leaf.
-    Per-toe `{toe}Curl` attributes on the settings ctrl curl that toe;
-    `taloneCurl` (global) curls all four together for a gripping pose.
+    Each toe is a 2-segment FK chain (proximal + distal) + a talon tip leaf,
+    riding the foot joint in IK and FK. Per-toe `{toe}Curl` attributes on
+    the settings ctrl curl that toe; `talonCurl` curls all four together
+    for a gripping pose.
     """
 
     TOE_NAMES = ["digit2", "digit3", "digit4", "hallux"]
@@ -570,13 +586,14 @@ class BirdLegRig(object):
 
         # Storage
         self.bind_jnts = []     # [femur, tibiotarsus, tarsometatarsus, foot, footTip]
-        self.fk_jnts   = []     # first 3 only (FK clone)
-        self.ik_jnts   = []     # first 3 only (IK clone)
-        self.fk_ctrls = []
+        self.fk_jnts   = []     # FK clone of all five
+        self.ik_jnts   = []     # IK clone of all five
+        self.fk_ctrls, self.fk_offsets = [], []   # femur .. foot
         self.ik_ctrl = self.pv_ctrl = self.settings_ctrl = None
-        self.ik_handle_main = None    # femur → tarsometatarsus
+        self.ik_handle_main = None    # femur → tarsometatarsus (RP)
         self.ik_handle_ankle = None   # tarsometatarsus → foot (SC)
         self.ik_handle_foot  = None   # foot → footTip (SC)
+        self.foot_locators = {}
         # Toes — dict[toe_name] -> dict(jnts=[...], ctrls=[...], autos=[...])
         self.toes = {}
 
@@ -619,6 +636,7 @@ class BirdLegRig(object):
         self._create_ik()
         self._create_reverse_foot()
         self._create_settings_ctrl()
+        self._create_stretchy_ik()
         self._create_ikfk_blend()
         self._create_visibility_sdk()
         self._create_toes()
@@ -640,11 +658,10 @@ class BirdLegRig(object):
         cmds.setAttr(f"{self.bind_jnts[-1]}.jointOrient", 0, 0, 0)
         cmds.parent(self.bind_jnts[0], self.parent_jnt)
 
-        # FK + IK chains are the first 3 (femur → tibiotarsus → tarsometatarsus).
-        # The foot joint is driven by the reverse-foot setup, not by an
-        # FK/IK blend — same as the biped LegRig ankle.
-        self.fk_jnts = self._duplicate_chain(self.bind_jnts[:3], "FK")
-        self.ik_jnts = self._duplicate_chain(self.bind_jnts[:3], "IK")
+        # FK + IK clones of the whole leg, so the foot follows the leg's
+        # mode like every other joint (the IK handles never touch BIND).
+        self.fk_jnts = self._duplicate_chain(self.bind_jnts, "FK")
+        self.ik_jnts = self._duplicate_chain(self.bind_jnts, "IK")
 
     def _duplicate_chain(self, source, suffix):
         new_chain = []
@@ -662,9 +679,11 @@ class BirdLegRig(object):
     # -----------------------------------------------------------------------
 
     def _create_fk(self):
-        for i, jnt in enumerate(self.fk_jnts):
+        # femur, tibiotarsus, tarsometatarsus and foot (not the tip leaf).
+        for i, jnt in enumerate(self.fk_jnts[:4]):
             ctrl = create_circle_ctrl(
-                jnt.replace("_JNT", "_CTRL"), radius=1.0 * SCALE,
+                jnt.replace("_JNT", "_CTRL"),
+                radius=(0.6 if i == 3 else 1.0) * SCALE,
                 normal=(1, 0, 0), color=self.color,
             )
             cmds.matchTransform(ctrl, jnt)
@@ -677,16 +696,32 @@ class BirdLegRig(object):
             lock_hide_attrs(ctrl, ["tx", "ty", "tz",
                                     "sx", "sy", "sz", "v"])
             self.fk_ctrls.append(ctrl)
+            self.fk_offsets.append(offset)
+        # Thigh / drumstick length, so FK can hold what stretchy IK does.
+        for i, part in ((1, "femur"), (2, "tibiotarsus")):
+            add_fk_length(self.fk_ctrls[i - 1], self.fk_offsets[i],
+                          f"{self.prefix}_{part}_fkLength_MD")
 
     # -----------------------------------------------------------------------
 
     def _create_ik(self):
-        # Main IK: femur → tarsometatarsus (3-joint RP).
+        # Main IK: femur → tarsometatarsus (3-joint RP), then SC handles on
+        # the IK chain down to the foot and the foot tip.
         self.ik_handle_main = cmds.ikHandle(
-            sj=self.ik_jnts[0], ee=self.ik_jnts[-1],
+            sj=self.ik_jnts[0], ee=self.ik_jnts[2],
             sol="ikRPsolver", n=f"{self.prefix}_ikMainHandle",
         )[0]
-        cmds.setAttr(f"{self.ik_handle_main}.v", 0)
+        self.ik_handle_ankle = cmds.ikHandle(
+            sj=self.ik_jnts[2], ee=self.ik_jnts[3],
+            sol="ikSCsolver", n=f"{self.prefix}_ikAnkleHandle",
+        )[0]
+        self.ik_handle_foot = cmds.ikHandle(
+            sj=self.ik_jnts[3], ee=self.ik_jnts[4],
+            sol="ikSCsolver", n=f"{self.prefix}_ikFootHandle",
+        )[0]
+        for h in (self.ik_handle_main, self.ik_handle_ankle,
+                  self.ik_handle_foot):
+            cmds.setAttr(f"{h}.v", 0)
 
         # IK foot ctrl — boot-shaped flat curve at the foot position.
         self.ik_ctrl = create_foot_ctrl(
@@ -717,95 +752,123 @@ class BirdLegRig(object):
     # -----------------------------------------------------------------------
 
     def _create_reverse_foot(self):
-        """Simple reverse-foot for the bird's ankle roll.
+        """Reverse foot, standing on the toes:
 
-        Two SC IK handles:
-            ankle:  tarsometatarsus_BIND → foot_BIND     (drives foot pose)
-            foot :  foot_BIND            → footTip_BIND  (drives toe pivot)
+            heelPivot_LOC       behind the foot, on the ground
+              └── tipPivot_LOC      the foot tip, on the ground
+                    ├── anklePivot_LOC   the foot (ball) joint
+                    │     ├── legIK_LOC    (femur → tarsometatarsus handle)
+                    │     └── ballIK_LOC   (tarsometatarsus → foot handle)
+                    └── toeBend_LOC      also at the foot joint
+                          (foot → foot tip handle)
 
-        A small chain of "reverse pivots" — heel, footTip, ankle — sits
-        under the IK ctrl. Animator-facing attrs on the IK ctrl:
-            footRoll  — heel (negative) ↔ ball/toe roll (positive)
-            heelTwist — twists heel pivot around Y
-            tipTwist  — twists footTip pivot around Y
-
-        The reverse-foot puts the IK handle for the main leg under the
-        ankle pivot so when the foot rolls, the main IK chain follows
-        automatically.
+        Attributes on the IK ctrl:
+            footRoll        one slider: negative rocks back on the heel and
+                            lifts the toes, 0..rollStartAngle lifts the
+                            ankle over planted toes, past that the foot
+                            rolls up onto its tip (Walk Mode uses it)
+            heelRoll / ballRoll / toeRoll    the three pivots on their own
+            toeBend         lifts the toes without moving the leg
+            footBank        tips the foot onto its outside edge
+            heelTwist / tipTwist             spin about the heel / tip
         """
-        # SC IK handles — direct connections (BIND → BIND), no clone chain.
-        # They follow the IK_handle_main once we re-parent everything.
-        self.ik_handle_ankle = cmds.ikHandle(
-            sj=self.bind_jnts[2], ee=self.bind_jnts[3],
-            sol="ikSCsolver", n=f"{self.prefix}_ikAnkleHandle",
-        )[0]
-        self.ik_handle_foot = cmds.ikHandle(
-            sj=self.bind_jnts[3], ee=self.bind_jnts[4],
-            sol="ikSCsolver", n=f"{self.prefix}_ikFootHandle",
-        )[0]
-        for h in (self.ik_handle_ankle, self.ik_handle_foot):
-            cmds.setAttr(f"{h}.v", 0)
+        foot_pos = self.positions["foot"]
+        tip_pos = self.positions["footTip"]
+        ankle_pos = self.positions["tarsometatarsus"]
+        low = min(foot_pos[1], tip_pos[1])
+        ground = 0.0 if abs(low) <= ankle_pos[1] - low else low
+        dx, dz = tip_pos[0] - foot_pos[0], tip_pos[2] - foot_pos[2]
+        length = math.hypot(dx, dz)
+        hx, hz = (dx / length, dz / length) if length > 1e-6 else (0.0, 1.0)
+        back = max(4.0, 0.4 * length)
+        heel_world = (foot_pos[0] - hx * back, ground,
+                      foot_pos[2] - hz * back)
+        tip_world = (tip_pos[0], ground, tip_pos[2])
 
-        # Pivot locators — simple empty transforms.
-        heel_pos = (cmds.getAttr(f"{self.bind_jnts[3]}.tx"),
-                     0.0,
-                     cmds.getAttr(f"{self.bind_jnts[3]}.tz") - 4.0)
-        # Use world positions instead:
-        foot_world = cmds.xform(self.bind_jnts[3], q=True, ws=True, t=True)
-        tip_world  = cmds.xform(self.bind_jnts[4], q=True, ws=True, t=True)
-        heel_world = (foot_world[0], 0.0, foot_world[2] - 4.0)
+        def piv(name, pos):
+            node = cmds.group(em=True, n=f"{self.prefix}_{name}")
+            cmds.xform(node, ws=True, t=pos)
+            return node
 
-        heel_piv = cmds.group(em=True, n=f"{self.prefix}_heelPivot_LOC")
-        cmds.xform(heel_piv, ws=True, t=heel_world)
-        tip_piv = cmds.group(em=True, n=f"{self.prefix}_tipPivot_LOC")
-        cmds.xform(tip_piv, ws=True, t=tip_world)
-        ankle_piv = cmds.group(em=True, n=f"{self.prefix}_anklePivot_LOC")
-        cmds.xform(ankle_piv, ws=True, t=foot_world)
+        heel_piv = piv("heelPivot_LOC", heel_world)
+        tip_piv = piv("tipPivot_LOC", tip_world)
+        ankle_piv = piv("anklePivot_LOC", foot_pos)
+        leg_ik = piv("legIK_LOC", ankle_pos)
+        ball_ik = piv("ballIK_LOC", foot_pos)
+        toe_bend = piv("toeBend_LOC", foot_pos)
+        self.foot_locators = {"heel": heel_piv, "tip": tip_piv,
+                              "ankle": ankle_piv, "legIK": leg_ik,
+                              "ballIK": ball_ik, "toeBend": toe_bend}
 
-        # Reverse-foot chain: ik_ctrl → heel_piv → tip_piv → ankle_piv
         cmds.parent(heel_piv, self.ik_ctrl)
         cmds.parent(tip_piv, heel_piv)
         cmds.parent(ankle_piv, tip_piv)
+        cmds.parent(leg_ik, ankle_piv)
+        cmds.parent(ball_ik, ankle_piv)
+        cmds.parent(toe_bend, tip_piv)
+        cmds.parent(self.ik_handle_main, leg_ik)
+        cmds.parent(self.ik_handle_ankle, ball_ik)
+        cmds.parent(self.ik_handle_foot, toe_bend)
 
-        # Park the IK handles + ankle handle under the appropriate pivots:
-        # - The toe SC handle parents under the tip_piv so it stays at the
-        #   foot's leading edge.
-        # - The ankle SC handle parents under the ankle_piv.
-        # - The MAIN leg IK handle ALSO parents under the ankle_piv so the
-        #   whole leg solves to wherever the ankle pivot lands.
-        cmds.parent(self.ik_handle_foot, tip_piv)
-        cmds.parent(self.ik_handle_ankle, ankle_piv)
-        cmds.parent(self.ik_handle_main, ankle_piv)
+        c = self.ik_ctrl
+        cmds.addAttr(c, ln="footRoll", at="double", min=-45, max=90, dv=0,
+                     k=True)
+        cmds.addAttr(c, ln="rollStartAngle", at="double", min=0, dv=25,
+                     k=True)
+        for attr in ("heelRoll", "ballRoll", "toeRoll", "toeBend",
+                     "footBank"):
+            cmds.addAttr(c, ln=attr, at="double", dv=0, k=True)
+        cmds.addAttr(c, ln="heelTwist", at="double", min=-90, max=90, dv=0,
+                     k=True)
+        cmds.addAttr(c, ln="tipTwist", at="double", min=-90, max=90, dv=0,
+                     k=True)
 
-        # ---- Foot attrs on the IK ctrl ----
-        cmds.addAttr(self.ik_ctrl, ln="footRoll", at="double",
-                      min=-45, max=90, dv=0, k=True)
-        cmds.addAttr(self.ik_ctrl, ln="heelTwist", at="double",
-                      min=-90, max=90, dv=0, k=True)
-        cmds.addAttr(self.ik_ctrl, ln="tipTwist", at="double",
-                      min=-90, max=90, dv=0, k=True)
+        def node(kind, name):
+            return cmds.createNode(kind, n=f"{self.prefix}_{name}")
 
-        # footRoll < 0 → heel rotates back; > 0 → tip pivot rolls forward.
-        cond_pos = cmds.createNode("condition",
-                                    n=f"{self.prefix}_rollPos_COND")
-        cmds.setAttr(f"{cond_pos}.operation", 2)  # greater-than
-        cmds.connectAttr(f"{self.ik_ctrl}.footRoll", f"{cond_pos}.firstTerm")
-        cmds.setAttr(f"{cond_pos}.secondTerm", 0)
-        cmds.connectAttr(f"{self.ik_ctrl}.footRoll", f"{cond_pos}.colorIfTrueR")
-        cmds.setAttr(f"{cond_pos}.colorIfFalseR", 0)
+        # From footRoll: heel = max(0, -roll), ball = clamp(roll, 0, start),
+        # tip = max(0, roll - start).
+        neg = node("multDoubleLinear", "negRoll_MULT")
+        cmds.connectAttr(f"{c}.footRoll", f"{neg}.input1")
+        cmds.setAttr(f"{neg}.input2", -1.0)
+        clamp = node("clamp", "roll_CLAMP")
+        cmds.connectAttr(f"{neg}.output", f"{clamp}.inputR")
+        cmds.connectAttr(f"{c}.footRoll", f"{clamp}.inputG")
+        sub = node("plusMinusAverage", "tipFromRoll_SUB")
+        cmds.setAttr(f"{sub}.operation", 2)
+        cmds.connectAttr(f"{c}.footRoll", f"{sub}.input1D[0]")
+        cmds.connectAttr(f"{c}.rollStartAngle", f"{sub}.input1D[1]")
+        cmds.connectAttr(f"{sub}.output1D", f"{clamp}.inputB")
+        cmds.connectAttr(f"{c}.rollStartAngle", f"{clamp}.maxG")
+        for ch in ("R", "B"):
+            cmds.setAttr(f"{clamp}.max{ch}", 9999.0)
 
-        cond_neg = cmds.createNode("condition",
-                                    n=f"{self.prefix}_rollNeg_COND")
-        cmds.setAttr(f"{cond_neg}.operation", 4)  # less-than
-        cmds.connectAttr(f"{self.ik_ctrl}.footRoll", f"{cond_neg}.firstTerm")
-        cmds.setAttr(f"{cond_neg}.secondTerm", 0)
-        cmds.connectAttr(f"{self.ik_ctrl}.footRoll", f"{cond_neg}.colorIfTrueR")
-        cmds.setAttr(f"{cond_neg}.colorIfFalseR", 0)
+        # The heel is the one pivot with the foot IN FRONT of it: +rotateX
+        # swings +Z points down, so lifting the toes needs -X.
+        heel_sum = node("plusMinusAverage", "heelSum_PMA")
+        cmds.setAttr(f"{heel_sum}.operation", 2)
+        cmds.setAttr(f"{heel_sum}.input1D[0]", 0.0)
+        cmds.connectAttr(f"{c}.heelRoll", f"{heel_sum}.input1D[1]")
+        cmds.connectAttr(f"{clamp}.outputR", f"{heel_sum}.input1D[2]")
+        cmds.connectAttr(f"{heel_sum}.output1D", f"{heel_piv}.rotateX")
+        for attr, out, loc in (("ballRoll", "outputG", ankle_piv),
+                               ("toeRoll", "outputB", tip_piv)):
+            total = node("plusMinusAverage", f"{attr}Sum_PMA")
+            cmds.connectAttr(f"{c}.{attr}", f"{total}.input1D[0]")
+            cmds.connectAttr(f"{clamp}.{out}", f"{total}.input1D[1]")
+            cmds.connectAttr(f"{total}.output1D", f"{loc}.rotateX")
 
-        cmds.connectAttr(f"{cond_pos}.outColorR", f"{tip_piv}.rotateX")
-        cmds.connectAttr(f"{cond_neg}.outColorR", f"{heel_piv}.rotateX")
-        cmds.connectAttr(f"{self.ik_ctrl}.heelTwist", f"{heel_piv}.rotateY")
-        cmds.connectAttr(f"{self.ik_ctrl}.tipTwist",  f"{tip_piv}.rotateY")
+        bend = node("multDoubleLinear", "toeBend_MULT")
+        cmds.connectAttr(f"{c}.toeBend", f"{bend}.input1")
+        cmds.setAttr(f"{bend}.input2", -1.0)
+        cmds.connectAttr(f"{bend}.output", f"{toe_bend}.rotateX")
+
+        bank = node("multDoubleLinear", "bank_MULT")
+        cmds.connectAttr(f"{c}.footBank", f"{bank}.input1")
+        cmds.setAttr(f"{bank}.input2", 1.0 if self.side == "L" else -1.0)
+        cmds.connectAttr(f"{bank}.output", f"{heel_piv}.rotateZ")
+        cmds.connectAttr(f"{c}.heelTwist", f"{heel_piv}.rotateY")
+        cmds.connectAttr(f"{c}.tipTwist", f"{tip_piv}.rotateY")
 
     # -----------------------------------------------------------------------
 
@@ -823,6 +886,8 @@ class BirdLegRig(object):
 
         cmds.addAttr(self.settings_ctrl, ln="ikFkSwitch", at="double",
                       min=0, max=1, dv=0, k=True)
+        cmds.addAttr(self.settings_ctrl, ln="autoStretch", at="double",
+                      min=0, max=1, dv=1, k=True)
         # Talon header
         cmds.addAttr(self.settings_ctrl, ln="talons", at="enum",
                       en="---------:", k=True)
@@ -840,11 +905,63 @@ class BirdLegRig(object):
 
     # -----------------------------------------------------------------------
 
+    def _create_stretchy_ik(self):
+        """Stretch the thigh and drumstick when the foot is pulled past
+        reach, measured from the hip joint to the ankle locator (same math
+        as the biped leg), so the foot stays planted when the body rises."""
+        tib_t = cmds.getAttr(f"{self.ik_jnts[1]}.translateX")
+        tars_t = cmds.getAttr(f"{self.ik_jnts[2]}.translateX")
+        target = self.foot_locators["legIK"]
+        anchor = make_stretch_anchor(self.ik_jnts[0], self.parent_jnt,
+                                     f"{self.prefix}_stretch_ANCHOR")
+        anchor_pos = cmds.xform(anchor, q=True, ws=True, t=True)
+        target_pos = cmds.xform(target, q=True, ws=True, t=True)
+        rest_length = math.dist(anchor_pos, target_pos)
+
+        dist = cmds.createNode("distanceBetween",
+                               n=f"{self.prefix}_stretch_DIST")
+        cmds.connectAttr(f"{anchor}.worldMatrix[0]", f"{dist}.inMatrix1")
+        cmds.connectAttr(f"{target}.worldMatrix[0]", f"{dist}.inMatrix2")
+        norm = cmds.createNode("multiplyDivide",
+                               n=f"{self.prefix}_stretch_NORM")
+        cmds.setAttr(f"{norm}.operation", 2)
+        cmds.connectAttr(f"{dist}.distance", f"{norm}.input1X")
+        if cmds.objExists("C_global_CTRL.globalScale"):
+            cmds.connectAttr("C_global_CTRL.globalScale", f"{norm}.input2X")
+        else:
+            cmds.setAttr(f"{norm}.input2X", 1.0)
+        ratio = cmds.createNode("multiplyDivide",
+                                n=f"{self.prefix}_stretch_RATIO")
+        cmds.setAttr(f"{ratio}.operation", 2)
+        cmds.connectAttr(f"{norm}.outputX", f"{ratio}.input1X")
+        cmds.setAttr(f"{ratio}.input2X", rest_length)
+        cond = cmds.createNode("condition", n=f"{self.prefix}_stretch_COND")
+        cmds.setAttr(f"{cond}.operation", 2)
+        cmds.connectAttr(f"{ratio}.outputX", f"{cond}.firstTerm")
+        cmds.setAttr(f"{cond}.secondTerm", 1.0)
+        cmds.connectAttr(f"{ratio}.outputX", f"{cond}.colorIfTrueR")
+        cmds.setAttr(f"{cond}.colorIfFalseR", 1.0)
+        blend = cmds.createNode("blendTwoAttr",
+                                n=f"{self.prefix}_stretch_BLEND")
+        cmds.setAttr(f"{blend}.input[0]", 1.0)
+        cmds.connectAttr(f"{cond}.outColorR", f"{blend}.input[1]")
+        cmds.connectAttr(f"{self.settings_ctrl}.autoStretch",
+                         f"{blend}.attributesBlender")
+        for i, t in ((1, tib_t), (2, tars_t)):
+            m = cmds.createNode("multDoubleLinear",
+                                n=f"{self.prefix}_stretch_{i}_MULT")
+            cmds.connectAttr(f"{blend}.output", f"{m}.input1")
+            cmds.setAttr(f"{m}.input2", t)
+            cmds.connectAttr(f"{m}.output",
+                             f"{self.ik_jnts[i]}.translateX", f=True)
+
+    # -----------------------------------------------------------------------
+
     def _create_ikfk_blend(self):
         rev = cmds.createNode("reverse", n=f"{self.prefix}_ikfk_REV")
         cmds.connectAttr(f"{self.settings_ctrl}.ikFkSwitch", f"{rev}.inputX")
 
-        for i in range(3):
+        for i in range(len(self.bind_jnts)):
             bind = self.bind_jnts[i]
             fk   = self.fk_jnts[i]
             ik   = self.ik_jnts[i]
@@ -856,7 +973,7 @@ class BirdLegRig(object):
                               f"{oc}.{weights[0]}")
             cmds.connectAttr(f"{rev}.outputX", f"{oc}.{weights[1]}")
 
-            if i > 0:
+            if i in (1, 2):     # the stretching segments
                 tx_blend = cmds.createNode("blendTwoAttr",
                                             n=f"{bind}_tx_BLEND")
                 cmds.connectAttr(f"{fk}.translateX",
@@ -903,10 +1020,15 @@ class BirdLegRig(object):
 
     def _create_toes(self):
         """Build the 4 toes. Each toe is a 2-joint FK chain (prox + dist)
-        + a talon-tip leaf joint."""
+        + a talon-tip leaf joint. Their ctrls hang under a group that
+        follows the foot joint, so the toes ride the foot through IK, FK
+        and every foot roll."""
         foot_bind = self.bind_jnts[3]    # foot ball
         cap = lambda s: s[0].upper() + s[1:]
         slots = ["prox", "dist"]
+        toes_grp = cmds.group(em=True, n=f"{self.prefix}_toes_GRP")
+        cmds.parent(toes_grp, self.ctrl_grp)
+        cmds.parentConstraint(foot_bind, toes_grp, mo=True)
 
         for toe in self.TOE_NAMES:
             toe_pos = self.positions.get(toe)
@@ -939,7 +1061,7 @@ class BirdLegRig(object):
             bind_jnts = [prox_jnt, dist_jnt]
             ctrls = []
             autos = []
-            prev_ctrl = self.ik_ctrl   # foot IK ctrl — toes follow the foot
+            prev_ctrl = toes_grp
             for slot, bind in zip(slots, bind_jnts):
                 ctrl = create_circle_ctrl(
                     f"{self.prefix}_{toe}{cap(slot)}_FK_CTRL",
@@ -1289,10 +1411,47 @@ class BirdRig(object):
 
     # -----------------------------------------------------------------------
 
+    def _size_factor(self):
+        """Guides scaled as a unit should build a rig scaled to match:
+        joints follow the guides already, but control sizes come from the
+        module SCALE. Measure the hip -> chest span against the default
+        guides; a default-size rig returns 1.0 (nothing changes)."""
+        try:
+            sp = (self.positions or {}).get("spine") or {}
+            hip, chest = sp.get("hip"), sp.get("chest")
+            dfl = self.DEFAULT_POSITIONS["spine"]
+            if hip and chest:
+                cur = sum((a - b) ** 2
+                          for a, b in zip(hip, chest)) ** 0.5
+                base = sum((a - b) ** 2 for a, b in
+                           zip(dfl["hip"], dfl["chest"])) ** 0.5
+                if base > 1e-4 and cur > 1e-4:
+                    return cur / base
+        except Exception:
+            pass
+        return 1.0
+
     def build(self):
         if cmds.objExists(self.TOP_GROUP):
             cmds.error(f"{self.TOP_GROUP} already exists. Delete it first.")
             return
+        # Controls and joints are drawn at the guides' size (1.0 = the
+        # default bird: nothing changes). CoreRig draws the global and COG
+        # controls from the character builder's own SCALE, so set both.
+        import character_rig_builder as _crb
+        global SCALE
+        _base, _core = SCALE, _crb.SCALE
+        factor = self._size_factor()
+        SCALE, _crb.SCALE = _base * factor, _core * factor
+        if abs(factor - 1.0) > 0.02:
+            print(f"[BirdRig] Guides are ~{factor:.2f}x the default size: "
+                  f"scaling controls + joints to match.")
+        try:
+            return self._build_impl()
+        finally:
+            SCALE, _crb.SCALE = _base, _core
+
+    def _build_impl(self):
         print(f"[BirdRig] Building modules: {sorted(self.modules)}")
 
         # 1. Core — reuse CoreRig, then rename the top group.
@@ -1332,8 +1491,8 @@ class BirdRig(object):
 
         # 4. Face — jaw (lower beak), eyes, tongue. Reuse FaceRig.
         if "face" in self.modules and self.neck:
-            head_jnt  = self.neck.bind_jnts[1]   # C_head_BIND_JNT
-            head_ctrl = self.neck.fk_ctrls[1]    # C_head_CTRL
+            head_jnt  = self.neck.head_jnt       # C_head_BIND_JNT
+            head_ctrl = self.neck.head_ctrl      # C_head_CTRL
             self.face = FaceRig(
                 positions=self.positions.get("face"),
                 parent_ctrl=head_ctrl, parent_jnt=head_jnt,

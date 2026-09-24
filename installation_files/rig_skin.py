@@ -11,6 +11,8 @@
    copy_weights(src, dst)       transfer weights between two meshes
    save_weights(mesh, folder)   write the skin weights to disk (deformerWeights)
    load_weights(mesh, folder)   read them back onto a (re-bound) mesh
+   smooth_weights(mesh)         relax the weights over the mesh's own surface
+   tidy_weights(mesh)           prune specks, cap the influences, normalise
 
  Save -> rebuild the rig -> bind -> load is the round-trip that lets you
  iterate on a rig without re-painting weights every time.
@@ -234,31 +236,59 @@ def _skeleton_bones(joints):
     return out
 
 
-def _bone_weights(p, bones, geo):
-    """Gradient weights for a point p: find its CLOSEST bone, then along that
-    bone give the bone-midpoint-full / joint-50-50 falloff (blend with the
-    previous bone in the proximal half, the next bone in the distal half)."""
-    best_d, best_i, best_t = 1e30, 0, 0.0
-    for i, (Pa, ab, L2) in enumerate(geo):
-        t = sum((p[k] - Pa[k]) * ab[k] for k in range(3)) / L2
-        t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
-        cp = [Pa[k] + t * ab[k] for k in range(3)]
-        d = sum((p[k] - cp[k]) ** 2 for k in range(3))
-        if d < best_d:
-            best_d, best_i, best_t = d, i, t
-    bone, t = bones[best_i], best_t
+# How the falloff blends. `BONE_BLEND` bones can share a vertex, as long as
+# they are within `BONE_REACH` times the closest bone's distance; `BONE_POWER`
+# sets how sharply the nearer bone wins (higher = tighter to one bone).
+BONE_BLEND = 3
+BONE_REACH = 2.0
+BONE_POWER = 3.0
+
+
+def _along_bone(bone, t):
+    """One bone's share of a vertex, split between its joints: the bone's
+    MIDDLE is full weight to its own joint, ramping to 50/50 at each end
+    (0, 25, 50, 100, 50, 25, 0 along the bone)."""
     a, b, pa = bone["a"], bone["b"], bone["pa"]
-    w = {}
     if t < 0.5:
         if pa:                                  # proximal half: blend a <- pa
-            w[a] = 0.5 + t
-            w[pa] = w.get(pa, 0.0) + 0.5 - t
-        else:                                   # root bone: full a
-            w[a] = 1.0
-    else:                                       # distal half: blend a -> b
-        w[a] = 1.5 - t
-        w[b] = w.get(b, 0.0) + t - 0.5
-    return w
+            return {a: 0.5 + t, pa: 0.5 - t}
+        return {a: 1.0}                         # root bone: full a
+    return {a: 1.5 - t, b: t - 0.5}             # distal half: blend a -> b
+
+
+def _bone_weights(p, bones, geo, blend=BONE_BLEND, reach=BONE_REACH,
+                  power=BONE_POWER, allowed=None):
+    """Gradient weights for a point p: the bone-falloff of every bone near
+    it, blended by how close each one is (inverse distance).
+
+    Taking only the closest bone leaves a hard seam wherever the closest
+    bone changes, right where a shoulder or hip needs to bend smoothly, so
+    the nearest few bones share the vertex instead."""
+    near = []
+    for i, (Pa, ab, L2) in enumerate(geo):
+        if allowed is not None and i not in allowed:
+            continue
+        t = sum((p[k] - Pa[k]) * ab[k] for k in range(3)) / L2
+        t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+        d2 = sum((p[k] - (Pa[k] + t * ab[k])) ** 2 for k in range(3))
+        near.append((d2, i, t))
+    if not near:
+        return {}
+    near.sort()
+    closest = near[0][0] ** 0.5
+    limit = max(closest * reach, 1e-9)
+    w, total = {}, 0.0
+    for d2, i, t in near[:blend]:
+        d = d2 ** 0.5
+        if d > limit:
+            break
+        pull = 1.0 / (max(d, 1e-6) ** power)
+        for j, share in _along_bone(bones[i], t).items():
+            w[j] = w.get(j, 0.0) + pull * share
+        total += pull
+    if total <= 0.0:
+        return {}
+    return {j: v / total for j, v in w.items()}
 
 
 def _apply_gradient(mesh, sc, bones, verts):
@@ -290,13 +320,34 @@ def _apply_gradient(mesh, sc, bones, verts):
     # also map full path tails so L_x_BIND_JNT resolves whatever the name form
     n = len(infs)
 
+    # Which bone owns each vertex, and which bones are its neighbours ACROSS
+    # THE SURFACE. Blending only with those keeps a hand near a hip (close in
+    # space, far across the mesh) from picking up the hip's weights.
+    owner = []
+    for vi in range(len(pts)):
+        p = (pts[vi].x, pts[vi].y, pts[vi].z)
+        best, best_i = 1e30, 0
+        for i, (Pa, ab, L2) in enumerate(geo):
+            t = sum((p[k] - Pa[k]) * ab[k] for k in range(3)) / L2
+            t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+            d2 = sum((p[k] - (Pa[k] + t * ab[k])) ** 2 for k in range(3))
+            if d2 < best:
+                best, best_i = d2, i
+        owner.append(best_i)
+    touching = {}
+    for vi, vj in _edge_pairs(mdag):
+        a, b = owner[vi], owner[vj]
+        touching.setdefault(a, {a}).add(b)
+        touching.setdefault(b, {b}).add(a)
+
     comp = om.MFnSingleIndexedComponent()
     cobj = comp.create(om.MFn.kMeshVertComponent)
     comp.addElements(target)
     weights = om.MDoubleArray(len(target) * n, 0.0)
     for row, vi in enumerate(target):
         p = (pts[vi].x, pts[vi].y, pts[vi].z)
-        for j, wv in _bone_weights(p, bones, geo).items():
+        allowed = touching.get(owner[vi], {owner[vi]})
+        for j, wv in _bone_weights(p, bones, geo, allowed=allowed).items():
             ji = idx.get(j)
             if ji is None:
                 ji = idx.get(j.split("|")[-1])
@@ -305,6 +356,151 @@ def _apply_gradient(mesh, sc, bones, verts):
     inf_arr = om.MIntArray(list(range(n)))
     mfn.setWeights(mdag, cobj, inf_arr, weights, True)
     return len(target)
+
+
+# =============================================================================
+# Smoothing + tidying weights
+# =============================================================================
+
+def _edge_pairs(dag):
+    """Every edge of a mesh as (vertex, vertex)."""
+    import maya.api.OpenMaya as om
+    fn = om.MFnMesh(dag)
+    return [fn.getEdgeVertices(e) for e in range(fn.numEdges)]
+
+
+def _mesh_and_skin(mesh):
+    """(dag path to the shape, MFnSkinCluster, influence names) or None."""
+    import maya.api.OpenMaya as om
+    import maya.api.OpenMayaAnim as oma
+    sc = skin_cluster(mesh)
+    if not sc:
+        cmds.warning(f"[skin] '{mesh}' has no skinCluster — bind it first.")
+        return None
+    sel = om.MSelectionList()
+    sel.add(mesh)
+    dag = sel.getDagPath(0)
+    dag.extendToShape()
+    ssel = om.MSelectionList()
+    ssel.add(sc)
+    fn = oma.MFnSkinCluster(ssel.getDependNode(0))
+    return dag, fn, [i.partialPathName() for i in fn.influenceObjects()]
+
+
+def _read_weights(dag, fn, n_inf, n_verts):
+    """Every vertex's weights as sparse dicts {influence index: weight}."""
+    import maya.api.OpenMaya as om
+    comp = om.MFnSingleIndexedComponent()
+    cobj = comp.create(om.MFn.kMeshVertComponent)
+    comp.setCompleteData(n_verts)
+    flat, _n = fn.getWeights(dag, cobj)
+    rows = []
+    for v in range(n_verts):
+        base = v * n_inf
+        rows.append({k: flat[base + k] for k in range(n_inf)
+                     if flat[base + k] > 1e-6})
+    return rows
+
+
+def _write_weights(dag, fn, n_inf, rows, verts=None):
+    import maya.api.OpenMaya as om
+    target = list(verts) if verts else list(range(len(rows)))
+    comp = om.MFnSingleIndexedComponent()
+    cobj = comp.create(om.MFn.kMeshVertComponent)
+    comp.addElements(target)
+    flat = om.MDoubleArray(len(target) * n_inf, 0.0)
+    for row, v in enumerate(target):
+        for k, wv in rows[v].items():
+            flat[row * n_inf + k] = wv
+    fn.setWeights(dag, cobj, om.MIntArray(list(range(n_inf))), flat, True)
+    return len(target)
+
+
+def _neighbours(dag, n_verts):
+    """Each vertex's connected vertices, from the mesh's own edges."""
+    out = [set() for _ in range(n_verts)]
+    for a, b in _edge_pairs(dag):
+        out[a].add(b)
+        out[b].add(a)
+    return out
+
+
+def _tidy_rows(rows, max_influences=4, prune=0.005):
+    """Drop specks, keep the strongest influences, make each vertex sum to 1."""
+    for v, w in enumerate(rows):
+        if not w:
+            continue
+        keep = sorted(w.items(), key=lambda kv: -kv[1])[:max_influences]
+        keep = [(k, x) for k, x in keep if x >= prune] or keep[:1]
+        total = sum(x for _k, x in keep) or 1.0
+        rows[v] = {k: x / total for k, x in keep}
+    return rows
+
+
+def smooth_weights(mesh, iterations=2, strength=0.5, verts=None,
+                   max_influences=4):
+    """Relax a mesh's skin weights over its own surface: each vertex blends
+    toward the average of the vertices it shares an edge with.
+
+    This is the pass that takes an automatic bind from "blocky" to usable:
+    it softens the hard lines where one joint's area meets the next, without
+    moving the weights away from their joints. `verts` limits it to a vertex
+    selection. Returns the number of vertices changed."""
+    import maya.api.OpenMaya as om
+    got = _mesh_and_skin(mesh)
+    if not got:
+        return 0
+    dag, fn, infs = got
+    n_inf = len(infs)
+    n_verts = om.MFnMesh(dag).numVertices
+    rows = _read_weights(dag, fn, n_inf, n_verts)
+    nb = _neighbours(dag, n_verts)
+    target = list(verts) if verts else list(range(n_verts))
+    s = max(0.0, min(1.0, float(strength)))
+    for _ in range(max(0, int(iterations))):
+        new = {}
+        for v in target:
+            around = nb[v]
+            if not around:
+                continue
+            avg = {}
+            for u in around:
+                for k, wv in rows[u].items():
+                    avg[k] = avg.get(k, 0.0) + wv
+            inv = 1.0 / len(around)
+            blend = {k: (1.0 - s) * rows[v].get(k, 0.0) + s * wv * inv
+                     for k, wv in avg.items()}
+            for k, wv in rows[v].items():
+                if k not in blend:
+                    blend[k] = (1.0 - s) * wv
+            total = sum(blend.values()) or 1.0
+            new[v] = {k: wv / total for k, wv in blend.items() if wv > 1e-6}
+        for v, w in new.items():
+            rows[v] = w
+    # A light prune only: smoothing's whole job is the small shared weights.
+    _tidy_rows(rows, max_influences=max_influences, prune=0.001)
+    n = _write_weights(dag, fn, n_inf, rows, target)
+    print(f"[skin] Smoothed {n} vert(s) of '{mesh}' "
+          f"({iterations} pass(es), strength {s:.2f}).")
+    return n
+
+
+def tidy_weights(mesh, max_influences=4, prune=0.005, verts=None):
+    """Prune weight specks, keep at most `max_influences` per vertex and
+    normalise: what a game engine expects. Returns the vertices changed."""
+    import maya.api.OpenMaya as om
+    got = _mesh_and_skin(mesh)
+    if not got:
+        return 0
+    dag, fn, infs = got
+    n_inf = len(infs)
+    n_verts = om.MFnMesh(dag).numVertices
+    rows = _tidy_rows(_read_weights(dag, fn, n_inf, n_verts),
+                      max_influences=max_influences, prune=prune)
+    n = _write_weights(dag, fn, n_inf, rows, verts)
+    print(f"[skin] Tidied {n} vert(s) of '{mesh}' "
+          f"(max {max_influences} influences).")
+    return n
 
 
 def _ensure_bound(mesh, joints):
@@ -321,7 +517,11 @@ def _ensure_bound(mesh, joints):
     return sc
 
 
-def gradient_skin_chain(mesh, joints, verts=None):
+# Passes of smoothing run after an automatic gradient skin.
+AUTO_SMOOTH = 2
+
+
+def gradient_skin_chain(mesh, joints, verts=None, smooth=AUTO_SMOOTH):
     """Gradient-skin `mesh` along the ORDERED joint chain `joints` (root->tip):
     each bone's middle = 100% its joint, ramping to 50/50 at the joints. Binds
     to the chain if the mesh isn't skinned. verts = a list of vertex indices to
@@ -336,12 +536,14 @@ def gradient_skin_chain(mesh, joints, verts=None):
         return False
     label_joints(chain)
     n = _apply_gradient(mesh, sc, bones, verts)
+    if smooth:
+        smooth_weights(mesh, iterations=smooth, verts=verts)
     print(f"[skin] Gradient-skinned {n} verts of '{mesh}' along "
           f"{len(chain)} joints ({chain[0]} -> {chain[-1]}).")
     return True
 
 
-def gradient_skin_auto(mesh, joints=None, verts=None):
+def gradient_skin_auto(mesh, joints=None, verts=None, smooth=AUTO_SMOOTH):
     """One-click gradient skin of `mesh` to the WHOLE BIND skeleton: every
     vertex takes the bone-falloff of its closest bone (mid-bone full, joints
     50/50). Binds to all BIND joints first if needed. verts limits it to a
@@ -356,6 +558,8 @@ def gradient_skin_auto(mesh, joints=None, verts=None):
         return False
     label_joints(joints)
     n = _apply_gradient(mesh, sc, bones, verts)
+    if smooth:
+        smooth_weights(mesh, iterations=smooth, verts=verts)
     print(f"[skin] Gradient-skinned {n} verts of '{mesh}' to "
           f"{len(bones)} bones (whole skeleton).")
     return True

@@ -36,7 +36,7 @@ buttons for every extra limb and chain.
 | **Winged** | `wing`: a 3-joint wing pair (shoulder, elbow, wrist) on the upper back, with shrug clavicles | Bat / demon / angel wings on a standing character. For feathered birds, use the Bird rig type |
 | **Centaur** | `hindLeg`: a hind leg pair 60 units back, `horseTail`: a tail at the rear | Turns off the normal Tail module for you, since the tail belongs on the horse body |
 | **Six-Legged** | `midLeg` and `hindLeg`: two extra leg pairs behind the first | Insects, spiders (add a third pair for eight legs), crabs |
-| **Dragon** | Lays the body guides out on all fours, turns the biped arms into wings with long finger spars, and adds a `frontLeg` pair on the chest | See *Dragons* below |
+| **Dragon** | Lays the body guides out on all fours, turns the biped arms into wings with long finger spars, adds a `frontLeg` pair on the chest, and gives it a 5-joint neck with an IK head | See *Dragons* below |
 
 Presets are all or nothing: if any limb in a preset would clash with one you
 already added, nothing is created and the panel tells you which name clashed.
@@ -154,12 +154,27 @@ edge.
   long **wing spars** for the membrane
 * a `frontLeg` pair is added under the chest (legs, so they get foot roll and
   walk)
+* the **neck becomes 5 joints with an IK head**: drag `C_headIK_CTRL` and the
+  whole neck arcs to follow, so you can plant the head on a target and
+  animate the body underneath
 
 Then move the guides onto your model. On the built rig, open and fold the
 wings with the wing FK controls, fan the membrane with **spread** on
 `L_arm_SETTINGS_CTRL`, and set **walkArmSwing** to 0 on the global control
 before using auto-walk so the wings don't flap. For a **wyvern** (wings for
 arms, two legs), apply the Dragon preset and remove the `frontLeg` limb.
+
+**Animating a dragon's neck.** `C_neck_SETTINGS_CTRL.ikFkSwitch` swaps
+between the head control (0) and one control per neck joint (1); the set you
+aren't using hides itself. `stretch` on the same control lets the neck reach
+a head control pulled past its length. `C_head_CTRL` still turns the head in
+both modes, so the face works as usual.
+
+**Flying a dragon.** Click **Fly Mode (WASD)** at the top of the panel. The
+wings beat, glide, tuck to dive and flare to land, the membrane closes
+(spread) when the wings fold on the ground, and all four legs tuck up in the
+air. Walk Mode leaves the wings folded instead of swinging them like arms.
+After a flight, **Tail Physics** bakes the tail's swing.
 
 **Centaur.** Fit the normal biped guides to the human half (its legs become
 the horse's front legs). Drag the `L_hindLeg_*` guides to the back legs and
@@ -206,8 +221,9 @@ Every extra limb is a full rig, not a simplified one:
   spaces, pole vectors get World / Hand or Foot / COG.
 * **Pose tools**: Copy Pose L to R, pose library flip and IK/FK match all
   include the extra limbs.
-* **Export**: Make Game Skeleton folds the extra joints into the single
-  skeleton, and Auto-Skin Everything picks them up.
+* **Export**: Export Rig and Export Animation include the extra limbs in the
+  skeleton automatically. For skinning, Make Game Skeleton folds them into
+  one hierarchy and Auto-Skin Everything picks them up.
 
 ---
 
@@ -248,8 +264,10 @@ The creature guides are handled by `rig_creature`: `add_limb()`,
 
 * **Extra arms and legs are copies of the biped's rigs.** A wing is an arm
   chain, not a feathered wing. For real birds use the **Bird** rig type.
-* **The neck is one joint plus the head**, even on the Dragon preset, so very
-  long S-curved necks aren't possible yet.
+* **Necks are as long as you want.** Set **Neck joints** in the Guides
+  section (1 is a person, 4 to 6 suits a dragon, horse or swan) and tick
+  **IK head** for a head control the neck follows. The Dragon preset does
+  this for you.
 * **Tail limbs from guides have 7 segments**, same as the biped's tail. Use a
   chain when you need a different count.
 * **Renaming a limb** means Remove Limb, then add it again with the new name.

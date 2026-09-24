@@ -30,7 +30,8 @@ EXPRESSIONS = {
     "neutral": {},                       # special: just zeros all dials
     "smile": {
         "C_mouth_CTRL.smile": 1.0,
-        "L_cheek_CTRL.cheekRaise": 0.6, "R_cheek_CTRL.cheekRaise": 0.6,
+        # (the mouth smile lifts the cheeks too, so only a touch extra)
+        "L_cheek_CTRL.cheekRaise": 0.25, "R_cheek_CTRL.cheekRaise": 0.25,
         "L_browOuter_CTRL.raise": 0.2, "R_browOuter_CTRL.raise": 0.2,
     },
     "sad": {

@@ -16,8 +16,8 @@ and where it hands off.
    MODEL  →  RIG  →  ANIMATE  →  EXPORT / RENDER
              ▲         ▲            ▲
              │         │            │
-      Rig Builder  animator     Make Game Skeleton
-      (this tool)  works only   + Export FBX
+      Rig Builder  animator     Export Rig +
+      (this tool)  works only   Export Animation
                    on _CTRLs
 ```
 
@@ -134,8 +134,9 @@ place the eyeball guide sphere → **Build Advanced Face** → bind → optional
 
 | Control | Key attributes |
 |---|---|
-| `L/R_blink_CTRL` | `blink`, `blinkHeight`, `lidFollow` |
-| `C_mouth_CTRL` | `smile`, `pucker`, `lipRoll`, `zip`, `jawFollow` |
+| `L/R_blink_CTRL` | `blink`, `blinkHeight`, `lidOverlap` (how far the lids close past each other, set by Smart Bind Face), `lidFollow` (with the shape dials) |
+| `C_mouth_CTRL` | `smile` (lifts the cheeks too), `pucker`, `lipRoll`, `zip`, `jawFollow` |
+| `L/R_mouthCorner_CTRL` | translate to pose both lips' corner |
 | `C_jaw_CTRL` | rotate to open, plus `jawSide`, `jawThrust` |
 | `L/R_brow*_CTRL` | `raise`, `furrow` (inner brows) |
 | `L/R_cheek_CTRL` | `puff`, `cheekRaise` |
@@ -143,6 +144,39 @@ place the eyeball guide sphere → **Build Advanced Face** → bind → optional
 
 Presets set the dials and can be installed into the pose library, so they behave
 like any other saved pose (blend, key, mirror).
+
+**Face shape dials:** in the Advanced Face window, **Add / Rebuild Shape Dials**
+puts `C_faceShapes_CTRL` on the face with 52 dials (0 to 1) named like iPhone
+ARKit and MediaPipe face tracking: `eyeBlinkLeft`, `eyeLookUpLeft`, `jawOpen`,
+`mouthSmileLeft`, `mouthFunnel`, `browInnerUp`, `cheekPuff`, `tongueOut` and the
+rest. Each one drives the rig you already have and adds on top of the other
+dials and hand posing, so they're good for keyframing and they're what face
+capture data plugs into. Left and Right are the character's own sides. Parts a
+face doesn't have are hidden. The visemes row (AI, E, O, U, MBP, FV, L, etc)
+sets lip sync mouth shapes from the dials; Shift+click keys them. The dials
+also add `lidFollow` to the blink controls: the lids ride up and down with the
+eyes. Rebuilding the Advanced Face keeps the dials and their values; Remove
+takes them off cleanly. Exporting zeroes them for the bind pose, like every
+other control.
+
+In Python: `import face_shapes; face_shapes.build()`, `face_shapes.set_values({"jawOpen": 0.5})`,
+`face_shapes.apply_viseme("O", key=True)`, `face_shapes.remove()`.
+
+**Face capture:** `face_tracker.py` runs outside Maya in a Python with
+MediaPipe (`python -m pip install mediapipe`) and streams the 52 shapes plus
+head rotation as small JSON packets over UDP to 127.0.0.1 (port 54321 by
+default). The **Face Capture** panel (`face_capture.show()`) listens, removes
+the calibrated neutral, applies per-group gains, mirror and One Euro
+smoothing, and drives `C_faceShapes_CTRL` and `C_neck_CTRL` / `C_head_CTRL`
+(35 / 65 split) without touching undo or auto key. Record resamples the take
+onto whole frames and writes keys from the current frame, replacing keys in
+that range. `face_capture.import_csv(path)` keys a Live Link Face CSV (frame
+rate read from its timecodes) or a tracker CSV. Left and Right are the
+performer's own sides, like ARKit. The **Drive** switches limit capture to
+whole regions (eyes, brows, mouth, cheeks, head); an unticked region is
+neither driven nor keyed. **Stop and Reset**, closing the panel and Esc all
+stop the tracker (it listens for a quit on the port above the data port),
+zero the dials and put the neck and head back.
 
 `showTweaks` on a blink or mouth control reveals the per-joint tweak controls
 for surgical fixes; leave it off for day-to-day animation.
@@ -153,16 +187,42 @@ for surgical fixes; leave it off for day-to-day animation.
 
 Skin targets are `_BIND_JNT` only. Beyond that:
 
-**Separate head/body meshes** — bind the body with **Auto-Skin Everything**,
-bind the head with **Bind Selected Face Mesh → Face Joints** (face joints only,
-so no spine influence bleeds into a cheek).
+**Smart Bind Face** (Advanced Face window) is the face bind for every case.
+Select the character's meshes, or nothing to use everything in the `geo`
+group, and click it. Each mesh is recognised and bound the way that part
+moves:
 
-**One combined head+body mesh** — two supported routes:
+| Mesh | Gets |
+|---|---|
+| One head + body mesh, or a head mesh | keeps its body skin (makes one if it has none, or only has face joints from an older bind), then a face layer only around the face: the jaw takes the lower face with soft edges into the cheeks and neck; lips and lids are split by the mesh's own mouth / eye openings, following the surface, so the mouth opens and the lids close; brows, cheeks, nose and ears get soft falloffs. Nothing below the neck is touched. |
+| Eyeballs | 100 % on the eye joint |
+| Eyelashes | the lash row of their lid |
+| Separate brows | a copy of the skin under them |
+| Upper / lower teeth, tongue | the teeth joints, the tongue chain |
+| Inner mouth | head above the lip line, jaw below |
+| Hair / hat | 100 % head |
+
+Run it again any time (after moving a face joint, say): the face layer is
+redone from scratch. It measures with every control at rest, so a posed
+face (a blink left on, a capture take) doesn't throw it off. The rim of each
+eye opening goes fully on the lash joints, and it sets each blink control's
+`lidOverlap` so the mesh's eye opening actually shuts on a full blink. In
+Python: `import face_bind; face_bind.smart_bind()`.
+
+**Lid seal:** the blink closes each lid along a curve through its master
+controls; between masters the upper and lower curves bend differently, so
+before the seal a lash joint here and there stayed a little open. Now, over
+the last 30 % of a blink, every lash joint meets the point straight across
+on the other lid (where depends on `blinkHeight`), never going inside the
+eyeball. Faces built before this: **Repair Face** in the Advanced Face
+window adds it (plus the mouth corner and smile fixes) without a rebuild.
+
+**One combined head+body mesh, other routes:**
 
 | Route | When | How |
 |---|---|---|
 | **A — export-first** | heading for a game engine | Build rig → Build face → **Make Game Skeleton** → **Auto-Skin Everything**. Folding the face joints under the head puts them in the single hierarchy, so auto-skin includes them. |
-| **B — non-destructive** | keeping the full control rig | **Auto-Skin Everything** first → build face → **Bind Selected Face Mesh → Face Joints**. This *adds* the face joints to the existing skinCluster and re-weights only the face region — the body's weights are preserved. |
+| **B — non-destructive** | keeping the full control rig | **Auto-Skin Everything** first → build face → **Smart Bind Face**. The body's weights are kept and only the face is layered on top. |
 
 Do not run route B's face bind on a mesh you intend to re-auto-skin afterwards;
 auto-skin skips already-bound meshes.
@@ -193,12 +253,28 @@ provably safe junk and never touches geometry or weights.
 
 ## 8. Export to Unreal / Unity
 
-1. **Make Game Skeleton** — reduces to a single clean `_BIND_JNT` hierarchy
-   under one root, and folds the advanced-face joints under the head so they
-   travel with the character.
-2. **Bake** any dynamic-chain motion — the sim nodes should not ship, the
-   resulting keys should.
-3. **Export FBX** — skinned mesh + skeleton (+ baked animation).
+Exports never change the working rig. Each one bakes a temporary clean copy
+of the skeleton (same bone names), writes it and deletes it, so the FBX holds
+real bones only and the rig file stays safe to keep animating in.
+
+1. **Export Rig (.fbx)**: the skeleton in its rest pose plus every skinned
+   mesh with its weights. Import it into the engine once as the skeletal
+   mesh.
+2. **Export Animation (.fbx)** for each move, or save **Clips** (name +
+   frames) and **Export All Clips to Folder**. One move per file; the engine
+   names the animation after the file.
+3. Keep **Root bone at the ground** the same for the rig and every
+   animation. On: a `root` bone at the ground carries the travel (root
+   motion). **In place** keeps the character at the origin for cycles the
+   engine moves.
+
+The skeleton in the file is: `root` (optional), `C_root_BIND_JNT`, then every
+deform joint under its nearest deform parent (loose chains under
+`C_root_BIND_JNT`, face lid / lip joints under the head). Dynamic chains,
+vehicle wheels, treads and trailers are baked like everything else. Crash
+dents (vehicle blendShapes) stay in Maya: the exported car is undamaged.
+**Make Game Skeleton** is still there for the export-first *skinning* path
+below, but exporting doesn't need it.
 
 The tag `builtWith` on `C_global_CTRL` records the tool version a rig was built
 with. Handy when a file resurfaces a year later.
@@ -227,7 +303,7 @@ with. Handy when a file resurfaces a year later.
 | Shelf button missing after install | No active shelf at install time. Run `import rig_ui; rig_ui.show()` from the Script Editor. |
 | Rig double-transforms when scaled | A group above `C_global_CTRL` was scaled. Use `globalScale` instead. |
 | Face doesn't deform after skinning | Mesh was bound before the face was built, or bound to body joints only. See §6. |
-| Blink deforms nothing | The face mesh isn't bound to the lid joints — run **Bind Selected Face Mesh → Face Joints**. |
+| Blink deforms nothing | The face mesh isn't bound to the lid joints — run **Smart Bind Face**. |
 | Limb pops on IK/FK switch | Use **Match IK/FK** rather than switching the blend attribute raw. |
 | A tool can't find a node | Duplicate names in the scene. Run the validator. |
 | Rebuild fails: "rig already exists" | Delete `CHARACTER_RIG_GRP` first (or use Delete Rig). |

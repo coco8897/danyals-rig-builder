@@ -87,12 +87,16 @@ def _extra_limb_config():
             local, nice, pv_nice = "C_spine_hip_CTRL", "Hips", "Foot"
         else:
             continue
+        # A limb built riding its local control (a raptor's arms on the
+        # chest) starts in that space so adding switches doesn't unpin it.
+        up = cmds.listRelatives(f"{prefix}_IK_OFFSET", p=True) or [None]
+        rides = up[0] == local
         cfg.append((ik, f"{prefix}_IK_OFFSET",
                     [("C_global_CTRL", "World"), ("C_cog_CTRL", "COG"),
-                     (local, nice)], 0))
+                     (local, nice)], 2 if rides else 0))
         cfg.append((f"{prefix}_PV_CTRL", f"{prefix}_PV_OFFSET",
                     [("C_global_CTRL", "World"), (ik, pv_nice),
-                     ("C_cog_CTRL", "COG")], 0))
+                     ("C_cog_CTRL", "COG")], 1 if rides else 0))
     return cfg
 
 

@@ -40,7 +40,9 @@
 
 import json
 import math
+import re
 import maya.cmds as cmds
+import maya.api.OpenMaya as om2
 
 try:
     from character_rig_builder import (SCALE, create_square_ctrl,
@@ -623,11 +625,25 @@ class AdvancedFace(object):
                          "and click a Fit button first.")
             return None
         self._mirror_eye_fits()
+        # The face shape dials (face_shapes) are wired into the controls this
+        # rebuild replaces: take them off first, put them back after.
+        shapes = None
+        try:
+            import face_shapes
+            if face_shapes.exists():
+                shapes = face_shapes.values()
+                face_shapes.remove()
+        except ImportError:
+            face_shapes = None
         # Build at NEUTRAL pose no matter how the rig is currently posed,
         # then restore the animator's pose afterwards.
         stored = self._neutralize_pose()
         try:
-            return self._build_neutral()
+            result = self._build_neutral()
+            if shapes is not None:
+                face_shapes.build()
+                face_shapes.set_values(shapes)
+            return result
         finally:
             for plug, v in stored:
                 try:
@@ -639,6 +655,28 @@ class AdvancedFace(object):
                       f"posed channel(s) temporarily zeroed + restored).")
 
     def _build_neutral(self):
+        # The previous build's utility nodes (remaps, blends, driven keys,
+        # curve infos) aren't under TOP_GROUP: delete them with it.
+        if cmds.objExists(NODES_SET):
+            old = cmds.sets(NODES_SET, q=True) or []
+            cmds.delete(NODES_SET)
+            for n in old:              # one by one: deleting one (a skin,
+                if cmds.objExists(n):  # say) can take others with it
+                    try:
+                        cmds.delete(n)
+                    except (RuntimeError, ValueError):
+                        pass
+        before = set(cmds.ls())
+        try:
+            return self._build_neutral_inner()
+        finally:
+            fresh = [n for n in cmds.ls() if n not in before
+                     and not cmds.ls(n, dag=True) and "_smileCheek_" not in n
+                     and cmds.nodeType(n) != "objectSet"]
+            if fresh:
+                cmds.sets(fresh, n=NODES_SET, empty=False)
+
+    def _build_neutral_inner(self):
         if cmds.objExists(TOP_GROUP):
             # Rescue the user-adjustable blink locators before deleting the
             # old build (they get parented under the controls group, so a
@@ -703,6 +741,7 @@ class AdvancedFace(object):
             if (f"{side}_lidUpper" in self.fits
                     and f"{side}_lidLower" in self.fits):
                 self._build_blink(side, ctl_grp)
+                add_lid_seal(side)
             # Optional crease rows: follow the inner-lid blink softly.
             self._wire_outer_lids(side)
 
@@ -735,6 +774,8 @@ class AdvancedFace(object):
             has_lids = any(r.endswith(("lidUpper", "lidLower")) for r in built)
             has_lips = any(r.endswith(("lipUpper", "lipLower")) for r in built)
             remove_standard_lids_lips(eyelids=has_lids, lips=has_lips)
+            if has_lips:
+                link_smile_to_cheeks()
 
         # Let the eye look-at controls blink the advanced lids (same attr).
         self._link_blink_to_lookat()
@@ -1138,35 +1179,8 @@ class AdvancedFace(object):
         # the seal-target constraint blend below. One system, no stacking.)
 
         # --- corner controls (direct posing of the shared corners) ---
-        for idx in (0, nU - 1):
-            cpos = _world_pos(upper[idx])
-            sd = "L" if cpos[0] >= centre[0] else "R"
-            if cmds.objExists(f"{sd}_mouthCorner_CTRL"):
-                continue   # degenerate loop: both ends on one side
-            cc = create_square_ctrl(f"{sd}_mouthCorner_CTRL",
-                                    size=max(0.05, 0.08 * width),
-                                    normal=(0, 0, 1),
-                                    color=(COLOR_L if sd == "L" else COLOR_R))
-            # Position the OFFSET group (not the ctrl) so the ctrl sits at
-            # zero — its translate is what drives the corner masters.
-            coff = cmds.group(cc, n=f"{sd}_mouthCorner_OFFSET")
-            cmds.xform(coff, ws=True, t=cpos)
-            cmds.parent(coff, ctl_grp)
-            _offset_shape_fwd(cc, 0.2 * width)   # float the corner ctrl out
-            for m in (upper[idx], lower[_pair_index(idx, nU, nL)]):
-                off = m.replace("_CTRL", "_OFFSET")
-                if not cmds.objExists(off):
-                    continue
-                # The OFFSET carries the master's REST position now, so the
-                # corner ctrl must ADD to it (a direct connect would
-                # teleport the master to the corner ctrl's local value).
-                rest = cmds.getAttr(f"{off}.translate")[0]
-                pma = cmds.createNode(
-                    "plusMinusAverage", n=m.replace("_CTRL", "_corner_PMA"))
-                cmds.setAttr(f"{pma}.input3D[0]", *rest)
-                cmds.connectAttr(f"{cc}.translate", f"{pma}.input3D[1]")
-                cmds.connectAttr(f"{pma}.output3D", f"{off}.translate",
-                                 f=True)
+        _make_mouth_corners(upper, lower, centre, width, ctl_grp,
+                            retire_standard=self.remove_standard)
 
         # --- JAW FOLLOW + STICKY SEAL TARGETS ------------------------------
         # One SEAL target per lip pair, parked at the pair MIDPOINT and
@@ -1401,6 +1415,9 @@ class AdvancedFace(object):
             # mesh and is easy to grab (transform stays on the loop, so the
             # driver joint + skinned curve are unaffected).
             _offset_shape_fwd(ctrl, 0.10 * loop_len)
+            # Scale never reached the curve (a parentConstraint carries no
+            # scale): hide the dead channels.
+            _lock_attrs(ctrl, ("sx", "sy", "sz"))
             ctrls.append(ctrl)
 
         # Parent all driver joints under the driver group AFTER creation
@@ -1500,6 +1517,11 @@ class AdvancedFace(object):
                 pass
 
     def delete(self):
+        try:
+            import face_shapes
+            face_shapes.remove()
+        except ImportError:
+            pass
         for n in (TOP_GROUP, self._FIT_NODE):
             if cmds.objExists(n):
                 cmds.delete(n)
@@ -1511,6 +1533,7 @@ class AdvancedFace(object):
 # =============================================================================
 
 CONTROLS_GROUP = "ADV_FACE_controls_GRP"
+NODES_SET = "ADV_FACE_NODES_SET"
 
 
 def diagnose_blink(side="L"):
@@ -1562,6 +1585,394 @@ def diagnose_blink(side="L"):
           "large, paste this whole block back. ===")
 
 
+class neutral_pose(object):
+    """Every control at rest for the duration (blink 0, smile 0, jaw shut,
+    shape dials 0 ...), then the pose comes back. Anything measured inside is
+    measured where the face was built and modelled, not wherever the last
+    pose or capture take left it."""
+
+    _NUMERIC = ("double", "float", "doubleLinear", "doubleAngle", "long",
+                "short", "bool", "enum")
+
+    def __enter__(self):
+        self.held = []
+        def numeric(plug):
+            try:
+                return cmds.getAttr(plug, type=True) in self._NUMERIC
+            except (RuntimeError, ValueError):
+                return False
+        for c in cmds.ls("*_CTRL", type="transform") or []:
+            ud = [a for a in (cmds.listAttr(c, ud=True, k=True) or [])
+                  if numeric(f"{c}.{a}")]
+            for a in ("translateX", "translateY", "translateZ",
+                      "rotateX", "rotateY", "rotateZ") + tuple(ud):
+                plug = f"{c}.{a}"
+                try:
+                    if cmds.getAttr(plug, lock=True) or \
+                            not cmds.getAttr(plug, se=True):
+                        continue
+                    dv = cmds.attributeQuery(a, node=c, listDefault=True)[0] \
+                        if a in ud else 0.0
+                    v = cmds.getAttr(plug)
+                    if abs(v - dv) > 1e-9:
+                        self.held.append((plug, v))
+                        cmds.setAttr(plug, dv)
+                except (RuntimeError, ValueError, TypeError):
+                    pass
+        return self
+
+    def __exit__(self, *exc):
+        for plug, v in reversed(self.held):
+            try:
+                cmds.setAttr(plug, v)
+            except RuntimeError:
+                pass
+        return False
+
+
+def _lash_row(side, which):
+    """The lash-line detail joints of one lid, in row order."""
+    pat = re.compile(r"^%s_lid%s_(\d+)_BIND_JNT$" % (side, which))
+    js = [j for j in cmds.ls(f"{side}_lid{which}_*_BIND_JNT", type="joint")
+          or [] if pat.match(j)]
+    return sorted(js, key=lambda j: int(pat.match(j).group(1)))
+
+
+def _base_source(joint):
+    """The plug giving a detail joint its CURVE point, looking through a
+    tweak PMA (input3D[0]) and a lid seal: (plug, pointOnCurveInfo)."""
+    plug = (cmds.listConnections(f"{joint}.translate", s=True, d=False,
+                                 p=True) or [None])[0]
+    for _ in range(4):
+        if not plug:
+            return None, None
+        node = plug.split(".")[0]
+        kind = cmds.objectType(node)
+        if kind == "pointOnCurveInfo":
+            return plug, node
+        if kind == "plusMinusAverage":
+            plug = (cmds.listConnections(f"{node}.input3D[0]", s=True,
+                                         d=False, p=True) or [None])[0]
+        elif kind == "blendColors":
+            if node.endswith("_seal_BC"):
+                return plug, (cmds.listConnections(f"{node}.color2", s=True,
+                                                   d=False) or [None])[0]
+            return None, None
+        else:
+            return None, None
+    return None, None
+
+
+def blink_ease(side):
+    """The remapValue that actually eases this side's blink: followed from
+    the blink control (through a face-shapes sum if there is one), not by
+    name, because a rebuild can leave a dead L_blinkEase_RMV behind and call
+    the live one L_blinkEase_RMV3."""
+    frontier = [f"{side}_blink_CTRL.blink"]
+    if not cmds.objExists(f"{side}_blink_CTRL"):
+        return None
+    seen = set()
+    for _ in range(5):
+        nxt = []
+        for plug in frontier:
+            for d in cmds.listConnections(plug, s=False, d=True, p=True) or []:
+                node = d.split(".")[0]
+                if node in seen:
+                    continue
+                seen.add(node)
+                kind = cmds.nodeType(node)
+                if kind == "remapValue" and "blinkEase" in node:
+                    return node
+                outs = {"plusMinusAverage": ("output1D",),
+                        "clamp": ("outputR",),
+                        "unitConversion": ("output",),
+                        "multDoubleLinear": ("output",)}.get(kind, ())
+                nxt += [f"{node}.{o}" for o in outs]
+        frontier = nxt
+    return None
+
+
+def _curve_param_across(curve_plug, point, axis0, axis1, samples=240):
+    """Fraction (0..1) along a curve whose point sits straight ACROSS from
+    `point`: the same position along the eye's corner-to-corner axis."""
+    ax = [b - a for a, b in zip(axis0, axis1)]
+    ll = sum(v * v for v in ax) or 1.0
+
+    def along(p):
+        return sum((p[k] - axis0[k]) * ax[k] for k in range(3)) / ll
+    want = along(point)
+    tmp = cmds.createNode("pointOnCurveInfo")
+    try:
+        cmds.connectAttr(curve_plug, f"{tmp}.inputCurve")
+        cmds.setAttr(f"{tmp}.turnOnPercentage", 1)
+        best = (1e30, 0.0)
+        for i in range(samples + 1):
+            f = i / float(samples)
+            cmds.setAttr(f"{tmp}.parameter", f)
+            d = abs(along(cmds.getAttr(f"{tmp}.position")[0]) - want)
+            if d < best[0]:
+                best = (d, f)
+        return best[1]
+    finally:
+        cmds.delete(tmp)
+
+
+def add_lid_seal(side=None, start=0.7):
+    with neutral_pose():
+        return _add_lid_seal(side, start)
+
+
+def _add_lid_seal(side=None, start=0.7):
+    """Close the blink EXACTLY. Each lid is a curve through its master
+    controls: the masters meet their partners, but between them the upper
+    and lower curves bend differently, so a detail joint here and there
+    stayed a little open (or went a little through). Over the last part of
+    the blink (from `start` of the eased blink to 1) every upper lash joint
+    and the point straight across on the lower lid are pulled to the same
+    point, so the whole lash line seals. Where they meet follows
+    blinkHeight (0: on the lower lid, which then stays put; 1: on the
+    upper), as far from the eyeball centre as the outer of the two lids, so
+    a seal never sinks a lid into the eye. lidOverlap (on the
+    blink control) closes the lids that much PAST each other, for a mesh
+    whose eye opening sits a little outside the lash joints. Below `start`
+    nothing changes.
+    Works on built rigs; safe to run again. Returns joints sealed."""
+    made = 0
+    for s in ([side] if side else ["L", "R"]):
+        ease = blink_ease(s)
+        up, lo = _lash_row(s, "Upper"), _lash_row(s, "Lower")
+        if not ease or len(up) < 3 or len(lo) < 3:
+            continue
+        rm = f"{s}_lidSeal_RMV"
+        if cmds.objExists(rm) and cmds.listConnections(
+                f"{rm}.inputValue", s=True, d=False) != [ease]:
+            cmds.delete(rm)                    # listening to a dead blink
+        if not cmds.objExists(rm):
+            rm = cmds.createNode("remapValue", n=rm)
+            cmds.connectAttr(f"{ease}.outValue", f"{rm}.inputValue")
+            for idx in (0, 1):
+                cmds.setAttr(f"{rm}.value[{idx}].value_Position", float(idx))
+                cmds.setAttr(f"{rm}.value[{idx}].value_FloatValue",
+                             float(idx))
+                cmds.setAttr(f"{rm}.value[{idx}].value_Interp", 2)
+        cmds.setAttr(f"{rm}.inputMin", float(start))
+        cmds.setAttr(f"{rm}.inputMax", 1.0)
+        blink_ctrl = f"{s}_blink_CTRL"
+        if not cmds.attributeQuery("lidOverlap", node=blink_ctrl,
+                                   exists=True):
+            cmds.addAttr(blink_ctrl, ln="lidOverlap", at="double", min=0.0,
+                         dv=0.0, k=True)
+        if not cmds.attributeQuery("blinkHeight", node=blink_ctrl,
+                                   exists=True):
+            _ensure_attr(blink_ctrl, "blinkHeight", 0, 1, 0.1)
+        bh = f"{blink_ctrl}.blinkHeight"
+        rev = f"{s}_lidSealHt_REV"
+        if not cmds.objExists(rev):
+            rev = cmds.createNode("reverse", n=rev)
+            cmds.connectAttr(bh, f"{rev}.inputX")
+        # the upper lid closes (1 - blinkHeight) of the overlap, the lower
+        # blinkHeight of it: blinkHeight 0 keeps the lower lid still
+        laps = {}
+        for key, share in (("Up", f"{rev}.outputX"), ("Lo", bh)):
+            md = f"{s}_lidOverlap{key}_MDL"
+            if not cmds.objExists(md):
+                md = cmds.createNode("multDoubleLinear", n=md)
+                cmds.connectAttr(f"{blink_ctrl}.lidOverlap", f"{md}.input1")
+                cmds.connectAttr(share, f"{md}.input2")
+            laps[key] = f"{md}.output"
+        for old in (f"{s}_lidOverlapHalf_MDL",):
+            if cmds.objExists(old):
+                cmds.delete(old)
+        head = next((h for h in ("C_head_BIND_JNT",) if cmds.objExists(h)),
+                    None)
+        pci = {j: _base_source(j)[1] for j in up + lo}
+        if not (pci.get(up[1]) and pci.get(lo[1])):
+            continue
+        curves = {}
+        for key, row in (("up", up), ("lo", lo)):
+            src = cmds.listConnections(f"{pci[row[1]]}.inputCurve", s=True,
+                                       d=False, p=True)
+            curves[key] = src[0] if src else None
+        if not (curves["up"] and curves["lo"]):
+            continue
+        # the eye's corner-to-corner axis (at rest), to find "straight across"
+        c0 = cmds.xform(up[0], q=True, ws=True, t=True)
+        c1 = cmds.xform(up[-1], q=True, ws=True, t=True)
+        # the eyeball's centre, live (it rides the head)
+        centre = next((n for n in (f"{s}_eyeball_LOC", f"{s}_eye_BIND_JNT")
+                       if cmds.objExists(n)), None)
+        dm = f"{s}_lidSeal_centre_DM"
+        if centre and not cmds.objExists(dm):
+            dm = cmds.createNode("decomposeMatrix", n=dm)
+            cmds.connectAttr(f"{centre}.worldMatrix[0]", f"{dm}.inputMatrix")
+        ctr = f"{dm}.outputTranslate" if centre else None
+        for row, other_curve, is_up in ((up, curves["lo"], True),
+                                        (lo, curves["up"], False)):
+            n = len(row)
+            for i, j in enumerate(row):
+                if i in (0, n - 1):
+                    continue                   # the corners are shared
+                bc = j.replace("_BIND_JNT", "_seal_BC")
+                avg = j.replace("_BIND_JNT", "_sealAvg_PMA")
+                across = j.replace("_BIND_JNT", "_sealAcross_PCI")
+                if cmds.objExists(bc):
+                    if cmds.listConnections(f"{bc}.output", s=False, d=True) \
+                            and cmds.listConnections(f"{bc}.blender", s=True,
+                                                     d=False) == [rm] \
+                            and (cmds.objExists(
+                                j.replace("_BIND_JNT", "_sealOut_PMA"))
+                                 or not ctr) \
+                            and cmds.objExists(
+                                j.replace("_BIND_JNT", "_sealLap_PMA")) \
+                            and cmds.objExists(
+                                j.replace("_BIND_JNT", "_sealMix_BC")):
+                        continue               # already sealed, and live
+                    _unseal(j)
+                p_self = pci.get(j)
+                if not p_self:
+                    continue
+                dests = [d for d in cmds.listConnections(
+                    f"{p_self}.position", s=False, d=True, p=True) or []
+                    if not d.split(".")[0].endswith(_SEAL_SUFFIXES)]
+                frac = _curve_param_across(
+                    other_curve, cmds.getAttr(f"{p_self}.position")[0],
+                    c0, c1)
+                across = cmds.createNode("pointOnCurveInfo", n=across)
+                cmds.connectAttr(other_curve, f"{across}.inputCurve")
+                cmds.setAttr(f"{across}.turnOnPercentage", 1)
+                cmds.setAttr(f"{across}.parameter", frac)
+                upper = f"{p_self}.position" if is_up else \
+                    f"{across}.position"
+                lower = f"{across}.position" if is_up else \
+                    f"{p_self}.position"
+                mix = cmds.createNode(
+                    "blendColors", n=j.replace("_BIND_JNT", "_sealMix_BC"))
+                cmds.connectAttr(upper, f"{mix}.color1")
+                cmds.connectAttr(lower, f"{mix}.color2")
+                cmds.connectAttr(bh, f"{mix}.blender")
+                meet = f"{mix}.output"
+                if ctr:
+                    meet = _outer_shell(j, meet, upper, lower, ctr, bh)
+                # lidOverlap: close PAST the meeting point, toward the other
+                # lid (the mesh's opening edge can sit a little outside the
+                # lash joints; this closes it)
+                a_ = cmds.getAttr(f"{across}.position")[0]
+                o_ = cmds.getAttr(f"{p_self}.position")[0]
+                d_ = om2.MVector(*[x - y for x, y in zip(a_, o_)])
+                if d_.length() > 1e-6:
+                    d_.normalize()
+                meet = _seal_overlap(j, meet, d_,
+                                     laps["Up" if is_up else "Lo"], head)
+                bc = cmds.createNode("blendColors", n=bc)
+                cmds.connectAttr(meet, f"{bc}.color1")
+                cmds.connectAttr(f"{p_self}.position", f"{bc}.color2")
+                cmds.connectAttr(f"{rm}.outValue", f"{bc}.blender")
+                for d in dests:
+                    cmds.connectAttr(f"{bc}.output", d, f=True)
+                made += 1
+    if made:
+        print(f"[advFace] Lid seal: {made} lash joints now close exactly on "
+              f"a full blink.")
+    return made
+
+
+_SEAL_SUFFIXES = ("_seal_BC", "_sealAvg_PMA", "_sealMix_BC", "_sealR_BC",
+                  "_sealAcross_PCI",
+                  "_sealVec_PMA", "_sealRself_DB", "_sealRacross_DB",
+                  "_sealR_CND", "_sealLen_DB", "_sealScale_MD", "_sealDir_MD",
+                  "_sealOut_PMA", "_sealDir_VP", "_sealLapAmt_MD",
+                  "_sealLap_PMA")
+
+
+def _seal_overlap(joint, meet, direction, amount, head):
+    """meet + direction * amount, the direction held in the head's frame so
+    it turns with the head. Returns the output plug."""
+    base = joint.replace("_BIND_JNT", "")
+    if head:
+        hm = om2.MMatrix(cmds.getAttr(f"{head}.worldMatrix[0]"))
+        local = direction * hm.inverse()
+        vp = cmds.createNode("vectorProduct", n=base + "_sealDir_VP")
+        cmds.setAttr(f"{vp}.operation", 3)
+        cmds.setAttr(f"{vp}.input1", local.x, local.y, local.z)
+        cmds.connectAttr(f"{head}.worldMatrix[0]", f"{vp}.matrix")
+        vec = f"{vp}.output"
+    else:
+        vp = cmds.createNode("plusMinusAverage", n=base + "_sealDir_VP")
+        cmds.setAttr(f"{vp}.input3D[0]", direction.x, direction.y,
+                     direction.z)
+        vec = f"{vp}.output3D"
+    md = cmds.createNode("multiplyDivide", n=base + "_sealLapAmt_MD")
+    cmds.connectAttr(vec, f"{md}.input1")
+    for ax in "XYZ":
+        cmds.connectAttr(amount, f"{md}.input2{ax}")
+    out = cmds.createNode("plusMinusAverage", n=base + "_sealLap_PMA")
+    cmds.connectAttr(meet, f"{out}.input3D[0]")
+    cmds.connectAttr(f"{md}.output", f"{out}.input3D[1]")
+    return f"{out}.output3D"
+
+
+def _outer_shell(joint, mid, upper, lower, centre, bh):
+    """`mid` pushed out from the eyeball centre to the OUTER of the two
+    lids (a straight-line blend between two points on a ball dips inside
+    it): centre + (mid - centre) * max(|upper-c|, |lower-c|) / |mid-c|.
+    Returns the output plug."""
+    a, b = upper, lower
+    base = joint.replace("_BIND_JNT", "")
+    vec = cmds.createNode("plusMinusAverage", n=base + "_sealVec_PMA")
+    cmds.setAttr(f"{vec}.operation", 2)                       # mid - c
+    cmds.connectAttr(mid, f"{vec}.input3D[0]")
+    cmds.connectAttr(centre, f"{vec}.input3D[1]")
+    dists = []
+    for plug, tag in ((a, "Rself"), (b, "Racross"), (mid, "Len")):
+        db = cmds.createNode("distanceBetween", n=f"{base}_seal{tag}_DB")
+        cmds.connectAttr(plug, f"{db}.point1")
+        cmds.connectAttr(centre, f"{db}.point2")
+        dists.append(f"{db}.distance")
+    # the OUTER of the two lids: going inside either one lets the eyeball
+    # show through the lid skin
+    cnd = cmds.createNode("condition", n=base + "_sealR_CND")
+    cmds.setAttr(f"{cnd}.operation", 2)                       # greater than
+    cmds.connectAttr(dists[0], f"{cnd}.firstTerm")
+    cmds.connectAttr(dists[1], f"{cnd}.secondTerm")
+    cmds.connectAttr(dists[0], f"{cnd}.colorIfTrueR")
+    cmds.connectAttr(dists[1], f"{cnd}.colorIfFalseR")
+    sc = cmds.createNode("multiplyDivide", n=base + "_sealScale_MD")
+    cmds.setAttr(f"{sc}.operation", 2)                        # r / |mid-c|
+    cmds.connectAttr(f"{cnd}.outColorR", f"{sc}.input1X")
+    cmds.connectAttr(dists[2], f"{sc}.input2X")
+    dv = cmds.createNode("multiplyDivide", n=base + "_sealDir_MD")
+    cmds.connectAttr(f"{vec}.output3D", f"{dv}.input1")
+    for ax in "XYZ":
+        cmds.connectAttr(f"{sc}.outputX", f"{dv}.input2{ax}")
+    out = cmds.createNode("plusMinusAverage", n=base + "_sealOut_PMA")
+    cmds.connectAttr(centre, f"{out}.input3D[0]")
+    cmds.connectAttr(f"{dv}.output", f"{out}.input3D[1]")
+    return f"{out}.output3D"
+
+
+def _unseal(joint):
+    """Take a lid seal off one joint (its consumers go back to the curve)."""
+    bc = joint.replace("_BIND_JNT", "_seal_BC")
+    if not cmds.objExists(bc):
+        return
+    src = cmds.listConnections(f"{bc}.color2", s=True, d=False, p=True)
+    for d in cmds.listConnections(f"{bc}.output", s=False, d=True,
+                                  p=True) or []:
+        cmds.disconnectAttr(f"{bc}.output", d)
+        if src:
+            cmds.connectAttr(src[0], d, f=True)
+    cmds.delete([n for n in (joint.replace("_BIND_JNT", suf)
+                             for suf in _SEAL_SUFFIXES) if cmds.objExists(n)])
+
+
+def repair_face():
+    """Bring a face built with an older version up to date: working mouth
+    corners, one smile, lid seal. Safe to run again."""
+    wired = repair_mouth_corners()
+    sealed = add_lid_seal()
+    return {"corners": wired, "sealed": sealed}
+
+
 def add_tertiary_controls(head_joint="C_head_BIND_JNT"):
     """Add a small TWEAK control on every advanced-face detail joint, so any
     single lid / lip joint can be nudged BY HAND on top of the blink to
@@ -1579,20 +1990,10 @@ def add_tertiary_controls(head_joint="C_head_BIND_JNT"):
     head = head_joint if cmds.objExists(head_joint) else None
 
     def _curve_driven(j_):
-        """True if the joint rides a curve point — either DIRECTLY (un-tweaked)
-        or through a tweak PMA fed by the pointOnCurveInfo (already tweaked, so
-        a re-run can still find + upgrade it)."""
-        for s in (cmds.listConnections(f"{j_}.translate", s=True, d=False)
-                  or []):
-            t = cmds.objectType(s)
-            if t == "pointOnCurveInfo":
-                return True
-            if t == "plusMinusAverage":
-                up = cmds.listConnections(f"{s}.input3D[0]", s=True,
-                                          d=False) or []
-                if any(cmds.objectType(u) == "pointOnCurveInfo" for u in up):
-                    return True
-        return False
+        """True if the joint rides a curve point — DIRECTLY (un-tweaked),
+        through a lid seal, or through a tweak PMA (already tweaked, so a
+        re-run can still find + upgrade it)."""
+        return _base_source(j_)[1] is not None
 
     joints = []
     for pat in ("*_lid*_BIND_JNT", "*_lip*_BIND_JNT"):
@@ -1619,19 +2020,11 @@ def add_tertiary_controls(head_joint="C_head_BIND_JNT"):
         except Exception:
             pass
 
-    def _pci_for(j_, tw_):
-        """The pointOnCurveInfo driving this joint's BASE (curve) point —
-        whether it still feeds the joint directly (un-tweaked) or now feeds
-        the tweak PMA's input3D[0] (already tweaked)."""
-        pma_ = f"{tw_}_PMA"
-        tgt = f"{pma_}.input3D[0]" if cmds.objExists(pma_) else f"{j_}.translate"
-        return next((s for s in (cmds.listConnections(tgt, s=True, d=False)
-                     or []) if cmds.objectType(s) == "pointOnCurveInfo"), None)
-
     made = []
     for j in sorted(joints):
         tw = j.replace("_BIND_JNT", "") + "_tweak_CTRL"
-        pci = _pci_for(j, tw)
+        # the joint's BASE point: the curve point, or the lid seal on it
+        base, pci = _base_source(j)
         if not pci:
             continue
         off = tw.replace("_CTRL", "_OFFSET")
@@ -1647,17 +2040,27 @@ def add_tertiary_controls(head_joint="C_head_BIND_JNT"):
                 vp = cmds.createNode("vectorProduct", n=f"{tw}_VP")
                 cmds.setAttr(f"{vp}.operation", 3)         # vector x matrix
                 cmds.connectAttr(f"{ctrl}.translate", f"{vp}.input1")
-                cmds.connectAttr(f"{head}.worldMatrix[0]", f"{vp}.matrix")
+                # the control's OWN frame (its parent): a nudge moves the
+                # joint exactly the way the control moves in the viewport
+                # (the head joint's axes are rotated on a biped, so using
+                # them pushed an 'up' nudge sideways)
+                cmds.connectAttr(f"{ctrl}.parentMatrix[0]", f"{vp}.matrix")
                 off_plug = f"{vp}.output"
             else:
                 off_plug = f"{ctrl}.translate"
             # joint.translate = curve(PCI) + offset
             pma = cmds.createNode("plusMinusAverage", n=f"{tw}_PMA")
-            cmds.connectAttr(f"{pci}.position", f"{pma}.input3D[0]")
+            cmds.connectAttr(base, f"{pma}.input3D[0]")
             cmds.connectAttr(off_plug, f"{pma}.input3D[1]")
-            cmds.disconnectAttr(f"{pci}.position", f"{j}.translate")
+            cmds.disconnectAttr(base, f"{j}.translate")
             cmds.connectAttr(f"{pma}.output3D", f"{j}.translate", f=True)
             made.append(ctrl)
+        # upgrade tweaks made before the frame fix
+        vp_ = f"{tw}_VP"
+        if cmds.objExists(vp_) and cmds.objExists(tw) and cmds.listConnections(
+                f"{vp_}.matrix", s=True, d=False, p=True) != [
+                f"{tw}.parentMatrix"]:
+            cmds.connectAttr(f"{tw}.parentMatrix[0]", f"{vp_}.matrix", f=True)
         # FOLLOW: drive the OFFSET to the joint's LIVE curve point so the
         # control travels WITH the lid on a blink (it used to stay behind).
         # The OFFSET lives in the head-following group, so convert the world
@@ -1665,7 +2068,7 @@ def add_tertiary_controls(head_joint="C_head_BIND_JNT"):
         fpmm = f"{tw}_followPMM"
         if not cmds.objExists(fpmm) and cmds.objExists(off):
             fpmm = cmds.createNode("pointMatrixMult", n=fpmm)
-            cmds.connectAttr(f"{pci}.position", f"{fpmm}.inPoint")
+            cmds.connectAttr(base, f"{fpmm}.inPoint")
             cmds.connectAttr(f"{grp}.worldInverseMatrix[0]", f"{fpmm}.inMatrix")
             cmds.connectAttr(f"{fpmm}.output", f"{off}.translate", f=True)
             for r in "XYZ":
@@ -1751,6 +2154,147 @@ _STD_LIP_NAMES = [
     "C_upperLip", "L_upperLipMid", "R_upperLipMid",
     "C_lowerLip", "L_lowerLipMid", "R_lowerLipMid",
 ]
+
+
+def _under_top(node):
+    path = (cmds.ls(node, long=True) or [""])[0]
+    return ("|%s|" % TOP_GROUP) in path
+
+
+def _make_mouth_corners(upper, lower, centre, width, ctl_grp,
+                        retire_standard=True):
+    """L / R mouth corner controls that pose the shared corner masters of
+    both lips. The standard face has its own `*_mouthCorner_CTRL` (moving a
+    standard corner joint the face bind never uses): it's retired first, or
+    its name kept the lip corner control from being made at all and dragging
+    a corner did nothing. Returns the number of corners wired."""
+    nU, nL = len(upper), len(lower)
+    wired = 0
+    for idx in (0, nU - 1):
+        cpos = _world_pos(upper[idx])
+        sd = "L" if cpos[0] >= centre[0] else "R"
+        name = f"{sd}_mouthCorner_CTRL"
+        if cmds.objExists(name) and not _under_top(name) and retire_standard:
+            jnt = f"{sd}_mouthCorner_BIND_JNT"
+            skinned = cmds.objExists(jnt) and bool(cmds.listConnections(
+                f"{jnt}.worldMatrix", type="skinCluster", s=False, d=True))
+            for suffix in ("_AUTO", "_OFFSET", "_CTRL", "_BIND_JNT"):
+                node = f"{sd}_mouthCorner{suffix}"
+                if not cmds.objExists(node):
+                    continue
+                if skinned:
+                    # A mesh is already bound to it: keep it, out of the way.
+                    cmds.rename(node, f"{sd}_mouthCornerStd{suffix}")
+                else:
+                    cmds.delete(node)
+        if cmds.objExists(name):
+            continue   # degenerate loop (both ends on one side), or kept
+        cc = create_square_ctrl(name, size=max(0.05, 0.08 * width),
+                                normal=(0, 0, 1),
+                                color=(COLOR_L if sd == "L" else COLOR_R))
+        # Position the OFFSET group (not the ctrl) so the ctrl sits at
+        # zero — its translate is what drives the corner masters.
+        coff = cmds.group(cc, n=f"{sd}_mouthCorner_OFFSET")
+        cmds.xform(coff, ws=True, t=cpos)
+        cmds.parent(coff, ctl_grp)
+        _offset_shape_fwd(cc, 0.2 * width)   # float the corner ctrl out
+        _lock_attrs(cc, ("rx", "ry", "rz", "sx", "sy", "sz"))
+        for m in (upper[idx], lower[_pair_index(idx, nU, nL)]):
+            off = m.replace("_CTRL", "_OFFSET")
+            if not cmds.objExists(off):
+                continue
+            src = cmds.listConnections(f"{off}.translate", s=True, d=False,
+                                       p=True) or []
+            if src:
+                # Already summed (a rebuilt corner): feed the existing PMA.
+                node = src[0].split(".")[0]
+                if cmds.nodeType(node) == "plusMinusAverage":
+                    cmds.connectAttr(f"{cc}.translate", f"{node}.input3D[1]",
+                                     f=True)
+                continue
+            # The OFFSET carries the master's REST position (or zero once
+            # the jaw-follow group took it over), so the corner ctrl must
+            # ADD to it (a direct connect would teleport the master).
+            rest = cmds.getAttr(f"{off}.translate")[0]
+            pma = cmds.createNode(
+                "plusMinusAverage", n=m.replace("_CTRL", "_corner_PMA"))
+            cmds.setAttr(f"{pma}.input3D[0]", *rest)
+            cmds.connectAttr(f"{cc}.translate", f"{pma}.input3D[1]")
+            cmds.connectAttr(f"{pma}.output3D", f"{off}.translate", f=True)
+        wired += 1
+    return wired
+
+
+def link_smile_to_cheeks(mouth="C_mouth_CTRL", jaw="C_jaw_CTRL"):
+    """ONE smile. The standard face's `C_jaw_CTRL.smile` lifted the cheeks
+    and its corner joints, but once the advanced lips replace the standard
+    mouth, jaw.smile only moved the cheeks while `C_mouth_CTRL.smile` only
+    moved the lips. Hand the cheek lift to the mouth smile, then hide the
+    jaw's leftover smile and lipsSeal dials (lipsSeal did nothing on the
+    advanced lips; zip is the seal). Returns the cheek links moved.
+
+    The jaw smile runs 0..10 and the mouth smile -1..1, so the mouth smile
+    goes through a x10 remap (clamped at 0: a frown doesn't lift cheeks)."""
+    if not (cmds.objExists(mouth) and cmds.objExists(jaw)
+            and cmds.attributeQuery("smile", node=mouth, exists=True)):
+        return 0
+    moved = 0
+    mdl, cl = f"{mouth}_smileCheek_MDL", f"{mouth}_smileCheek_CLAMP"
+    dests = []
+    if cmds.attributeQuery("smile", node=jaw, exists=True):
+        dests = [d for d in cmds.listConnections(f"{jaw}.smile", s=False,
+                                                 d=True, p=True) or []
+                 if cmds.nodeType(d.split(".")[0]).startswith("animCurve")]
+    linked = cmds.listConnections(f"{cl}.outputR", s=False, d=True,
+                                  p=True) or [] if cmds.objExists(cl) else []
+    if dests or linked:
+        if not cmds.objExists(mdl):
+            mdl = cmds.createNode("multDoubleLinear", n=mdl)
+            cmds.setAttr(f"{mdl}.input2", 10.0)
+        # (re)connect: a rebuilt mouth control is a new node
+        if cmds.listConnections(f"{mdl}.input1", s=True, d=False,
+                                p=True) != [f"{mouth}.smile"]:
+            cmds.connectAttr(f"{mouth}.smile", f"{mdl}.input1", f=True)
+        if not cmds.objExists(cl):
+            cl = cmds.createNode("clamp", n=cl)
+            cmds.setAttr(f"{cl}.maxR", 10.0)
+        if not cmds.listConnections(f"{cl}.inputR", s=True, d=False):
+            cmds.connectAttr(f"{mdl}.output", f"{cl}.inputR", f=True)
+        for dest in dests:
+            cmds.disconnectAttr(f"{jaw}.smile", dest)
+            cmds.connectAttr(f"{cl}.outputR", dest, f=True)
+            moved += 1
+    for attr in ("smile", "lipsSeal"):
+        if cmds.attributeQuery(attr, node=jaw, exists=True):
+            try:
+                cmds.setAttr(f"{jaw}.{attr}", 0)
+                cmds.setAttr(f"{jaw}.{attr}", k=False, cb=False)
+            except Exception:
+                pass
+    return moved
+
+
+def repair_mouth_corners():
+    """For faces built before the corner fix: give the advanced lips working
+    L / R corner controls, join the smile to the cheeks and hide the dead
+    master scale channels. Safe to run again. Returns corners wired."""
+    upper = [c for c in sorted(cmds.ls("C_lipUpper_master_*_CTRL",
+                                       type="transform") or [])]
+    lower = [c for c in sorted(cmds.ls("C_lipLower_master_*_CTRL",
+                                       type="transform") or [])]
+    wired = 0
+    ctl_grp = "ADV_FACE_controls_GRP"
+    if len(upper) >= 3 and len(lower) >= 3 and cmds.objExists(ctl_grp):
+        allp = [_world_pos(c) for c in upper + lower]
+        centre = _centroid(allp)
+        xs = [q[0] for q in allp]
+        width = (max(xs) - min(xs)) or 1.0
+        wired = _make_mouth_corners(upper, lower, centre, width, ctl_grp)
+        link_smile_to_cheeks()
+    for ctrl in cmds.ls("*_lid*_master_*_CTRL", "*_lip*_master_*_CTRL",
+                        type="transform") or []:
+        _lock_attrs(ctrl, ("sx", "sy", "sz"))
+    return wired
 
 
 def remove_standard_lids_lips(eyelids=True, lips=True):
